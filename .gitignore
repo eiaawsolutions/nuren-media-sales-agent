@@ -1,0 +1,9 @@
+node_modules/
+data/*.db
+data/*.db-*
+.env
+.DS_Store
+*.log
+knowledge-base/*.pptx
+!knowledge-base/.gitkeep
+.claude/

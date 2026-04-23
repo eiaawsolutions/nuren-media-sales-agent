@@ -1,0 +1,69 @@
+:root {
+  --ink:#1b1147;
+  --ink-2:#3b3064;
+  --blush:#f7b5c4;
+  --cream:#fff7ef;
+  --sage:#6f9d8b;
+  --gold:#d9a441;
+  --line:#e7dfd1;
+}
+* { box-sizing:border-box; }
+body { margin:0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif; color:var(--ink); background:#f5f0e6; }
+#root { min-height:100vh; }
+
+/* --- login --- */
+.login-wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+.login-card { background:#fff; padding:32px; border-radius:18px; box-shadow:0 8px 36px rgba(27,17,71,.07); width:100%; max-width:380px; border:1px solid var(--line); }
+.login-card h1 { margin:0 0 4px; font-size:22px; }
+.login-card p { margin:0 0 22px; color:var(--ink-2); font-size:14px; }
+.login-card input { display:block; width:100%; padding:12px 14px; border:1.5px solid var(--line); border-radius:10px; font-size:14px; margin-bottom:12px; background:var(--cream); font-family:inherit; }
+.login-card button { width:100%; padding:12px; border:none; background:var(--ink); color:#fff; border-radius:10px; font-weight:600; cursor:pointer; font-size:14px; }
+.login-card .err { color:#b91c1c; font-size:13px; margin:8px 0; }
+
+/* --- layout --- */
+.shell { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+.sidebar { background:#fff; border-right:1px solid var(--line); padding:22px 14px; }
+.sidebar .brand { font-weight:800; font-size:17px; padding:4px 10px 20px; }
+.sidebar .brand span { color:var(--blush); }
+.sidebar nav { display:flex; flex-direction:column; gap:2px; }
+.sidebar nav a { padding:9px 12px; border-radius:8px; color:var(--ink-2); font-size:13.5px; font-weight:500; text-decoration:none; display:flex; justify-content:space-between; align-items:center; }
+.sidebar nav a.active { background:var(--cream); color:var(--ink); }
+.sidebar nav a:hover { background:var(--cream); }
+.sidebar .user { position:sticky; bottom:0; padding:14px 10px; font-size:12px; color:var(--ink-2); border-top:1px solid var(--line); margin-top:22px; }
+.main { padding:28px 32px; }
+.main h1 { font-size:22px; margin:0 0 4px; font-weight:700; }
+.main .sub { color:var(--ink-2); margin:0 0 22px; font-size:14px; }
+
+/* --- cards --- */
+.grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); }
+.card { background:#fff; padding:18px; border-radius:14px; border:1px solid var(--line); }
+.card h3 { margin:0 0 6px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-2); font-weight:600; }
+.card .big { font-size:26px; font-weight:700; }
+.card .hint { font-size:12px; color:var(--ink-2); margin-top:4px; }
+
+/* --- tables --- */
+table { width:100%; border-collapse:collapse; background:#fff; border-radius:14px; overflow:hidden; border:1px solid var(--line); }
+th, td { padding:11px 14px; font-size:13px; text-align:left; border-bottom:1px solid var(--line); }
+th { background:var(--cream); font-weight:600; color:var(--ink-2); text-transform:uppercase; letter-spacing:.04em; font-size:11.5px; }
+tr:last-child td { border-bottom:none; }
+.btn { display:inline-block; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; font-size:13px; cursor:pointer; font-weight:500; color:var(--ink); font-family:inherit; text-decoration:none; }
+.btn.primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+.btn.ghost { background:transparent; }
+.btn.danger { color:#b91c1c; border-color:#f1c4c4; }
+.badge { display:inline-block; padding:2px 8px; font-size:11px; border-radius:999px; background:var(--cream); color:var(--ink-2); font-weight:600; }
+.badge.ok { background:#e6f4ef; color:#1a6b4f; }
+.badge.warn { background:#fdecd1; color:#8c5b0e; }
+.badge.fail { background:#fde2e2; color:#a12525; }
+.badge.busy { background:#e5e0f4; color:#40309c; }
+
+/* --- upload --- */
+.uploader { padding:18px; border:2px dashed var(--line); border-radius:14px; text-align:center; background:#fff; margin-bottom:16px; }
+.uploader input[type=file] { margin-bottom:10px; }
+
+/* --- form --- */
+label { display:block; font-size:12px; color:var(--ink-2); margin-bottom:4px; font-weight:500; }
+input[type=text], input[type=email], input[type=password], input[type=url], select, textarea {
+  padding:10px 12px; border:1.5px solid var(--line); border-radius:10px; font-size:13.5px; background:#fff; font-family:inherit; color:var(--ink); width:100%; margin-bottom:12px;
+}
+.row { display:flex; gap:10px; }
+.row > * { flex:1; }
