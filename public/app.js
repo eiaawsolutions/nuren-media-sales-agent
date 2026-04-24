@@ -651,8 +651,8 @@ async function runApolloGenerate(campaignId, campaignName, onDone) {
   if (!countStr) return;
   const count = Math.min(Math.max(parseInt(countStr, 10) || 5, 1), 15);
   const busy = el('div', {
-    style: 'position:fixed; top:20px; right:20px; background:#2a1f5c; color:white; padding:12px 18px; border-radius:10px; font-size:13.5px; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,.15)'
-  }, `Apollo searching for ${count} leads… 2–5 seconds.`);
+    style: 'position:fixed; top:20px; right:20px; background:#2a1f5c; color:white; padding:12px 18px; border-radius:10px; font-size:13.5px; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,.15); max-width:320px; line-height:1.4'
+  }, `Apollo: searching ${count} candidates → dedup → enrich → hot-vet… ~3–8 seconds.`);
   document.body.appendChild(busy);
   try {
     const r = await api('/campaigns/' + campaignId + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count }) });
@@ -661,9 +661,20 @@ async function runApolloGenerate(campaignId, campaignName, onDone) {
       if (onDone) onDone();
       return;
     }
+    if (r.generated === 0) {
+      const whyNot = r.rejected_cold > 0
+        ? `All ${r.rejected_cold} candidates were vetted out (no decision-maker seniority OR no buying signal).`
+        : `All ${r.rejected} candidates failed verification.`;
+      alert(`0 leads kept.\n${whyNot}\n\nTry broadening the ICP or running again — Apollo rotates results.`);
+      if (onDone) onDone();
+      return;
+    }
+    const breakdown = r.linkedin_only > 0
+      ? `\nBreakdown: ${r.email_ready} email-ready + ${r.linkedin_only} LinkedIn-only.`
+      : '';
     const coldLine = r.rejected_cold ? `\n${r.rejected_cold} filtered as cold (no buying signal or junior role).` : '';
     const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
-    alert(`Apollo searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${coldLine}\n\nOpen the Leads tab to see them.`);
+    alert(`Apollo searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${breakdown}${coldLine}\n\nOpen the Leads tab to see them.`);
     if (onDone) onDone();
   } catch (e) {
     showGenerateLeadsError(e);
@@ -852,15 +863,33 @@ function CampaignDetailView(id) {
         genStatus.textContent = `Apollo: searching ${n} candidates → ${method} → hot-lead vetting…`;
         try {
           const r = await api('/campaigns/' + id + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count: n }) });
+
+          // Empty result — every candidate was already known to us
           if (r.generated === 0 && r.message) {
             genStatus.innerHTML = `<span style="color:#b86b0a">${r.message}</span>`;
             load();
             return;
           }
+          // Empty result — every candidate failed hot-vetting. Not a silent
+          // success: tell the operator why and what to try next.
+          if (r.generated === 0) {
+            const whyNot = r.rejected_cold > 0
+              ? `All ${r.rejected_cold} candidates were vetted out (no decision-maker seniority OR no buying signal).`
+              : `All ${r.rejected} candidates failed verification (duplicate emails or missing LinkedIn).`;
+            genStatus.innerHTML = `<span style="color:#b86b0a">0 leads kept. ${whyNot} Try broadening the ICP or running again — Apollo rotates results.</span>`;
+            load();
+            return;
+          }
+
           const rejectedCold = r.rejected_cold || 0;
+          const emailReady = r.email_ready || 0;
+          const linkedinOnly = r.linkedin_only || 0;
+          const breakdownLine = linkedinOnly > 0
+            ? ` (<span style="color:#1a6b4f">${emailReady} email-ready</span> + <span style="color:#8c5b0e">${linkedinOnly} LinkedIn-only</span>)`
+            : '';
           const vettingLine = rejectedCold > 0 ? ` · <span style="color:#b86b0a">${rejectedCold} filtered as cold</span>` : '';
           const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${vettingLine} · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
+          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${breakdownLine}${vettingLine}. <a href="#/leads">View leads →</a>`;
           load();
         } catch (e) {
           if (e.code === 'apollo_not_configured') {
@@ -877,7 +906,7 @@ function CampaignDetailView(id) {
       } }, 'Apollo Generate');
       genCard.append(
         el('h3', {}, 'Apollo lead generation'),
-        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Apollo.io database search + enrichment. Only HOT leads are kept — verified email, decision-maker seniority (manager+), and at least one buying signal (fresh role, org-size fit, or active employment). Cold leads are filtered out. Cost: 1 Apollo credit per enriched lead (~$0.05).'),
+        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Apollo.io database search + enrichment. Only HOT leads are kept — decision-maker seniority (manager+) with at least one buying signal (fresh role, org-size fit, or active employment). Leads with verified emails get an "email" badge and can be enrolled into sequences; leads with no verified email get a "linkedin-only" badge (reach them manually). Cost: 1 Apollo credit per enriched candidate (~$0.05).'),
         el('div', { style: 'display:flex; align-items:center; gap:10px; flex-wrap:wrap' },
           el('label', { style: 'font-size:13px' }, 'How many candidates (max 15): '),
           countInput,
@@ -941,9 +970,19 @@ function CampaignDetailView(id) {
       }
 
       function renderRow(l) {
-        const heatBadge = (l.lead_type || 'cold').toLowerCase() === 'hot'
-          ? el('span', { class: 'badge warn' }, 'HOT')
-          : el('span', { class: 'badge' }, 'cold');
+        // Heat badge. For HOT leads, also show outreach mode — email-ready
+        // leads can be enrolled into the email sequence; linkedin-only leads
+        // need manual outreach on LinkedIn.
+        const isHot = (l.lead_type || 'cold').toLowerCase() === 'hot';
+        const heatBadge = el('span', {});
+        if (isHot) {
+          heatBadge.append(el('span', { class: 'badge warn' }, 'HOT'));
+          if (!l.email) {
+            heatBadge.append(' ', el('span', { class: 'badge', style: 'background:#e5e0f4; color:#40309c' }, 'LinkedIn-only'));
+          }
+        } else {
+          heatBadge.append(el('span', { class: 'badge' }, 'cold'));
+        }
         const emailCell = l.email
           ? el('td', { class: 'col-email' }, l.email)
           : el('td', { class: 'col-email' }, el('span', { class: 'muted-cell' }, 'no email'));

@@ -180,9 +180,14 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       rejected.push({ name: candidate.name, reasons: ['cold:' + hotVerdict.reason] });
       continue;
     }
-    // Override lead_type + buying_signal with what the vetter found.
+    // Override lead_type + buying_signal with what the vetter found. Stash
+    // outreach_mode in enrichment so downstream features (sequence scheduler,
+    // UI badges) can tell email-ready leads apart from LinkedIn-only ones.
     candidate.lead_type = 'hot';
     candidate.buying_signal = hotVerdict.signal;
+    if (candidate.enrichment && typeof candidate.enrichment === 'object') {
+      candidate.enrichment.outreach_mode = hotVerdict.outreach_mode;
+    }
 
     const gate = verifyLead(candidate);
     if (!gate.ok) {
@@ -209,13 +214,18 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       lead_type: gate.lead.lead_type,
       confidence_score: gate.lead.confidence_score,
       buying_signal: gate.lead.buying_signal,
+      outreach_mode: hotVerdict.outreach_mode,
     });
   }
 
-  console.log(`[apollo-lead-gen] DONE persisted=${accepted.length} rejected_total=${rejected.length} rejected_cold=${rejectedCold} credits=${creditsConsumed}`);
+  const emailReady = accepted.filter(l => l.outreach_mode === 'email').length;
+  const linkedinOnly = accepted.filter(l => l.outreach_mode === 'linkedin').length;
+  console.log(`[apollo-lead-gen] DONE persisted=${accepted.length} (${emailReady} email-ready + ${linkedinOnly} LinkedIn-only) rejected_total=${rejected.length} rejected_cold=${rejectedCold} credits=${creditsConsumed}`);
 
   return {
     generated: accepted.length,
+    email_ready: emailReady,
+    linkedin_only: linkedinOnly,
     rejected: rejected.length,
     rejected_cold: rejectedCold,
     source: 'apollo',
@@ -245,16 +255,23 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
 const HOT_SENIORITIES = new Set(['manager', 'director', 'head', 'vp', 'c_suite', 'founder', 'owner', 'partner']);
 
 function classifyHotness(person) {
-  // Hygiene prerequisite — no verified email means can't do cold outreach anyway
-  if ((person.email_status || '').toLowerCase() !== 'verified') {
-    return { hot: false, reason: 'no_verified_email' };
-  }
-
-  // Seniority gate
+  // Seniority gate — must be a decision-maker. Junior ICs aren't worth the
+  // outreach; they can't sign contracts.
   const seniority = (person.seniority || '').toLowerCase();
   if (seniority && !HOT_SENIORITIES.has(seniority)) {
     return { hot: false, reason: `seniority_too_junior:${seniority}` };
   }
+
+  // Email verification is NO LONGER a hard gate. 2026-04-24 operator feedback:
+  // Apollo frequently returns real decision-makers at real companies with
+  // `email_status: unavailable` — e.g. Brand Leads at Lazada, Cetaphil,
+  // Unicharm — where we could never build outreach if we rejected these.
+  // Instead: keep them as HOT, mark email as '' (not guessed), and let the
+  // operator reach them via LinkedIn DM. A separate outreach_mode tag tells
+  // the UI whether the lead can be enrolled into email sequences.
+  //
+  // Apollo's email_status values: 'verified', 'likely_to_engage', 'guessed',
+  // 'unavailable', null. Only 'verified' is safe for cold-outreach automation.
 
   // Try to fire at least one buying signal
   const signals = [];
@@ -286,7 +303,15 @@ function classifyHotness(person) {
   const best = signals.find(s => s.startsWith('fresh_mandate'))
             || signals.find(s => s.startsWith('org_size_fit'))
             || signals[0];
-  return { hot: true, signal: best, reason: null };
+
+  // outreach_mode tells the UI + the sequence scheduler whether this lead
+  // can be reached via email automation. 'email' = verified, ready for cold
+  // sequence. 'linkedin' = real decision-maker but no verified email, needs
+  // manual LinkedIn DM / calling / alternative channel.
+  const emailStatus = (person.email_status || '').toLowerCase();
+  const outreachMode = emailStatus === 'verified' ? 'email' : 'linkedin';
+
+  return { hot: true, signal: best, reason: null, outreach_mode: outreachMode };
 }
 
 function getApolloKey() {
