@@ -656,8 +656,14 @@ async function runApolloGenerate(campaignId, campaignName, onDone) {
   document.body.appendChild(busy);
   try {
     const r = await api('/campaigns/' + campaignId + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count }) });
+    if (r.generated === 0 && r.message) {
+      alert(r.message);
+      if (onDone) onDone();
+      return;
+    }
     const coldLine = r.rejected_cold ? `\n${r.rejected_cold} filtered as cold (no buying signal or junior role).` : '';
-    alert(`Apollo searched ${r.total_returned} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${coldLine}\n\nOpen the Leads tab to see them.`);
+    const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
+    alert(`Apollo searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${coldLine}\n\nOpen the Leads tab to see them.`);
     if (onDone) onDone();
   } catch (e) {
     showGenerateLeadsError(e);
@@ -846,9 +852,15 @@ function CampaignDetailView(id) {
         genStatus.textContent = `Apollo: searching ${n} candidates → ${method} → hot-lead vetting…`;
         try {
           const r = await api('/campaigns/' + id + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count: n }) });
+          if (r.generated === 0 && r.message) {
+            genStatus.innerHTML = `<span style="color:#b86b0a">${r.message}</span>`;
+            load();
+            return;
+          }
           const rejectedCold = r.rejected_cold || 0;
           const vettingLine = rejectedCold > 0 ? ` · <span style="color:#b86b0a">${rejectedCold} filtered as cold</span>` : '';
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${vettingLine} · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
+          const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
+          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${vettingLine} · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
           load();
         } catch (e) {
           if (e.code === 'apollo_not_configured') {

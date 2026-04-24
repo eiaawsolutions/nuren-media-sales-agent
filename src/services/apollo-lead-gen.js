@@ -49,27 +49,58 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   }
 
   const filters = buildApolloFilters(campaign);
-  const searchBody = {
-    ...filters,
-    page: 1,
-    per_page: numLeads,
-  };
 
-  // Step 1 — zero-credit structured search. Returns candidate records with
-  // id/name/title/company (obfuscated last_name, no email/phone/linkedin).
-  console.log(`[apollo-lead-gen] START campaignId=${campaignId} requested=${numLeads} filters=${JSON.stringify(filters)}`);
-  let searchResponse;
+  // Pre-load the user's known Apollo IDs so we never enrich the same person
+  // twice. This runs BEFORE search so we can fetch extra pages if the first
+  // page is mostly duplicates — saving Apollo credits for genuinely new leads.
+  const knownApolloIds = new Set(
+    db.prepare("SELECT enrichment FROM leads WHERE user_id = ? AND source = 'apollo' AND enrichment IS NOT NULL").all(userId)
+      .map(r => { try { return JSON.parse(r.enrichment)?.apollo_id; } catch { return null; } })
+      .filter(Boolean)
+  );
+  console.log(`[apollo-lead-gen] START campaignId=${campaignId} requested=${numLeads} known_apollo_ids=${knownApolloIds.size} filters=${JSON.stringify(filters)}`);
+
+  // Step 1 — zero-credit structured search. We over-fetch + paginate to
+  // compensate for dedup against knownApolloIds, so a user who has already
+  // enrolled 5 leads can still get 5 genuinely new ones on the next click.
+  // Apollo's per_page max is 25 for api_search on Professional; we use 15
+  // as a safe default and iterate pages until we have enough candidates.
+  const candidates = [];
+  let searchPages = 0;
+  const MAX_SEARCH_PAGES = 5;
+  const PER_PAGE = 15;
+
   try {
-    searchResponse = await apolloFetch('/mixed_people/api_search', apiKey, searchBody);
+    for (let page = 1; page <= MAX_SEARCH_PAGES; page++) {
+      const searchBody = { ...filters, page, per_page: PER_PAGE };
+      const resp = await apolloFetch('/mixed_people/api_search', apiKey, searchBody);
+      searchPages++;
+      const pagePeople = Array.isArray(resp?.people) ? resp.people : [];
+      const fresh = pagePeople.filter(p => !knownApolloIds.has(p.id));
+      candidates.push(...fresh);
+      console.log(`[apollo-lead-gen] search page ${page}: ${pagePeople.length} returned, ${fresh.length} new (total so far: ${candidates.length}/${numLeads})`);
+      if (candidates.length >= numLeads) break;
+      // Stop if Apollo had no more results on this page
+      if (pagePeople.length < PER_PAGE) break;
+    }
   } catch (err) {
     throw rewriteApolloError(err);
   }
 
-  const candidates = Array.isArray(searchResponse?.people) ? searchResponse.people : [];
-  console.log(`[apollo-lead-gen] search returned ${candidates.length} candidates (total_entries=${searchResponse?.total_entries})`);
+  // Trim to what the operator asked for — no point enriching candidates they
+  // won't see in this batch. They'll surface on the next click.
+  if (candidates.length > numLeads) candidates.length = numLeads;
 
   if (candidates.length === 0) {
-    return { generated: 0, rejected: 0, rejected_cold: 0, source: 'apollo', requested: numLeads, total_returned: 0, enrichment_calls: 0, leads: [], rejections: [] };
+    return {
+      generated: 0, rejected: 0, rejected_cold: 0,
+      source: 'apollo', requested: numLeads, total_returned: 0,
+      search_pages: searchPages, enrichment_calls: 0, credits_consumed: 0,
+      leads: [], rejections: [],
+      message: knownApolloIds.size > 0
+        ? `All ${searchPages * PER_PAGE} search results were already in your leads. Broaden the campaign ICP (industry, persona, budget tier) to find new candidates.`
+        : 'No candidates matched the campaign ICP. Try broadening the targeting.',
+    };
   }
 
   // Step 2 — enrichment. Single-enrich (/people/match) for count=1, bulk-enrich
@@ -190,6 +221,7 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     source: 'apollo',
     requested: numLeads,
     total_returned: candidates.length,
+    search_pages: searchPages,
     enrichment_calls: enrichmentCalls,
     credits_consumed: creditsConsumed,
     leads: accepted,

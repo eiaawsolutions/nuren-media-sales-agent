@@ -126,7 +126,7 @@ export function listLeads(userId, { status, persona, lead_type, search, limit = 
            a.name AS account_name, a.industry AS account_industry
     FROM leads l LEFT JOIN accounts a ON a.id = l.account_id
     WHERE ${where.join(' AND ')}
-    ORDER BY l.created_at DESC
+    ORDER BY l.created_at DESC, l.id DESC
     LIMIT ? OFFSET ?
   `;
   params.push(limit, offset);
