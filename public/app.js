@@ -566,6 +566,13 @@ function showGenerateLeadsError(e) {
     }
     return;
   }
+  if (e.code === 'apollo_key_stale') {
+    const url = e.billingUrl || 'https://app.apollo.io/#/settings/integrations/api';
+    if (confirm('Your Apollo key was generated BEFORE your workspace upgraded to a paid plan. Apollo stamps API entitlement onto keys at creation and does not retro-upgrade old keys.\n\nFIX: revoke the current key, create a new one, and paste the new key into Settings → apollo_api_key.\n\nOpen Apollo API keys page now?')) {
+      window.open(url, '_blank', 'noopener');
+    }
+    return;
+  }
   if (e.code === 'apollo_credits_depleted') {
     const url = e.billingUrl || 'https://app.apollo.io/#/settings/plans';
     if (confirm('Apollo credits are depleted or monthly quota hit.\n\nTop up or wait for reset?')) {

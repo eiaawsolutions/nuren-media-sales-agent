@@ -351,13 +351,20 @@ function rewriteApolloError(err) {
   const msg = err.message || '';
   const pay = JSON.stringify(err.payload || {}).toLowerCase();
 
-  // Apollo returns 403 with error_code=API_INACCESSIBLE when your plan doesn't
-  // include API access for the endpoint. Free plans block /mixed_people/api_search
-  // + /people/match. Distinct from a bad key (also 401/403 but with different body).
-  if (status === 403 && /api_inaccessible|not accessible|upgrade your plan|free plan/i.test(pay)) {
-    const e = new Error('Your Apollo plan does not include API access for lead search. Upgrade to a paid plan at https://app.apollo.io/#/settings/plans — Basic tier and above include the People Search + Enrichment APIs.');
-    e.code = 'apollo_plan_insufficient';
-    e.billingUrl = 'https://app.apollo.io/#/settings/plans';
+  // Apollo returns 403 with error_code=API_INACCESSIBLE when the API key is not
+  // entitled for this endpoint. Two causes we disambiguate:
+  //   1. The *workspace* is on a free plan (message: "on a free plan")
+  //   2. The *key* was generated before the workspace upgraded — Apollo stamps
+  //      plan entitlement onto the key at creation and doesn't retro-upgrade.
+  //      Message: "not accessible with this api_key" (no plan mention).
+  if (status === 403 && /api_inaccessible|not accessible with this api_key|upgrade your plan|free plan/i.test(pay)) {
+    const onFreePlan = /free plan|upgrade your plan/i.test(pay);
+    const msg = onFreePlan
+      ? 'Your Apollo workspace is on a free plan. Upgrade at https://app.apollo.io/#/settings/plans — Basic tier and above unlock the People Search + Enrichment APIs.'
+      : 'Your Apollo key was generated before the workspace upgrade — Apollo stamps plan entitlement onto keys at creation. REVOKE the current key at https://app.apollo.io/#/settings/integrations/api and CREATE A NEW KEY. Paste the new key into Settings → apollo_api_key.';
+    const e = new Error(msg);
+    e.code = onFreePlan ? 'apollo_plan_insufficient' : 'apollo_key_stale';
+    e.billingUrl = onFreePlan ? 'https://app.apollo.io/#/settings/plans' : 'https://app.apollo.io/#/settings/integrations/api';
     return e;
   }
   if (status === 401 || status === 403) {
