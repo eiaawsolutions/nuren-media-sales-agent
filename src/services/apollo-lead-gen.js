@@ -73,10 +73,12 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   let enrichmentCalls = 0;
   for (const candidate of candidates) {
     try {
+      // reveal_phone_number requires a webhook_url (Apollo delivers phones async);
+      // we keep the flow synchronous by revealing emails only. Phones come back
+      // when the organization has direct dials published, not via reveal.
       const enriched = await apolloFetch('/people/match', apiKey, {
         id: candidate.id,
         reveal_personal_emails: true,
-        reveal_phone_number: true,
       });
       enrichmentCalls++;
       // The enrichment response nests the person under `person`; fall back to
