@@ -21,6 +21,7 @@ import campaignsRouter from './routes/campaigns.js';
 import pipelineRouter from './routes/pipeline.js';
 import appointmentsRouter, { lookupByCallToken } from './routes/appointments.js';
 import analyticsRouter from './routes/analytics.js';
+import assistantRouter from './routes/assistant.js';
 import { handleInboundReply } from './services/reply-handler.js';
 import { startScheduler } from './services/scheduler.js';
 
@@ -83,6 +84,7 @@ app.use('/api/campaigns', requireAuth, campaignsRouter);
 app.use('/api/pipeline', requireAuth, pipelineRouter);
 app.use('/api/appointments', requireAuth, appointmentsRouter);
 app.use('/api/analytics', requireAuth, analyticsRouter);
+app.use('/api/assistant', requireAuth, assistantRouter);
 
 // Public lookup for branded /call/:token landing — no auth, no PII leakage
 app.get('/api/public/call/:token', (req, res) => {

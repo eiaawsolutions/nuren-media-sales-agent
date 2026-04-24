@@ -131,7 +131,160 @@ function Shell() {
   const view = routeView();
   main.append(view);
 
+  // Ensure the floating assistant widget is mounted once (outside #root so
+  // route changes don't wipe its history). Idempotent — no-op if already there.
+  ensureAssistantWidget();
+
   return shell;
+}
+
+// ====================== ASSISTANT (floating chatbot) ======================
+const assistantState = {
+  open: false,
+  messages: [], // { role: 'user' | 'bot' | 'error', text, citations? }
+  pending: false,
+  panel: null,
+  fab: null,
+};
+
+function ensureAssistantWidget() {
+  if (!state.token) return; // no widget on login screen
+  if (document.getElementById('assistant-fab')) return;
+
+  const fab = el('button', {
+    id: 'assistant-fab',
+    class: 'assistant-fab',
+    title: 'Ask the Nuren assistant',
+    'aria-label': 'Open assistant',
+    onclick: toggleAssistant,
+  });
+  // Speech-bubble icon
+  fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+  document.body.appendChild(fab);
+  assistantState.fab = fab;
+}
+
+function toggleAssistant() {
+  if (assistantState.open) closeAssistant();
+  else openAssistant();
+}
+
+function openAssistant() {
+  if (assistantState.panel) return;
+  assistantState.open = true;
+
+  const panel = el('div', { class: 'assistant-panel', id: 'assistant-panel', role: 'dialog', 'aria-label': 'Nuren assistant' });
+
+  const head = el('div', { class: 'assistant-head' });
+  head.append(
+    el('div', {},
+      el('h4', {}, 'Nuren assistant'),
+      el('div', { class: 'sub-line' }, 'Answers from the KB + app docs. Pennies per question.'),
+    ),
+    el('button', { class: 'assistant-close', 'aria-label': 'Close', onclick: closeAssistant }, '×'),
+  );
+  const body = el('div', { class: 'assistant-body', id: 'assistant-body' });
+  const foot = el('div', { class: 'assistant-foot' });
+  const ta = el('textarea', {
+    placeholder: 'Ask about rates, features, or how to do something…',
+    rows: 1,
+    'aria-label': 'Your question',
+    onkeydown: (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); sendBtn.click(); }
+    },
+    oninput: (ev) => {
+      ev.target.style.height = 'auto';
+      ev.target.style.height = Math.min(ev.target.scrollHeight, 120) + 'px';
+    },
+  });
+  const sendBtn = el('button', { class: 'send-btn', onclick: async () => {
+    const q = ta.value.trim();
+    if (!q || assistantState.pending) return;
+    ta.value = ''; ta.style.height = 'auto';
+    await sendAssistantMessage(q);
+  } }, 'Send');
+  foot.append(ta, sendBtn);
+
+  panel.append(head, body, foot);
+  document.body.appendChild(panel);
+  assistantState.panel = panel;
+
+  renderAssistantBody();
+  setTimeout(() => ta.focus(), 50);
+}
+
+function closeAssistant() {
+  assistantState.open = false;
+  if (assistantState.panel) {
+    assistantState.panel.remove();
+    assistantState.panel = null;
+  }
+}
+
+function renderAssistantBody() {
+  const body = document.getElementById('assistant-body');
+  if (!body) return;
+  body.innerHTML = '';
+
+  if (!assistantState.messages.length) {
+    const welcome = el('div', { class: 'assistant-welcome' });
+    welcome.append(
+      el('div', {}, 'Ask me anything grounded in Nuren\'s knowledge base or this app\'s features. I keep answers short and cite sources where I can.'),
+      el('div', { class: 'quick-prompts' },
+        el('button', { onclick: () => askQuick('What\'s the Motherhood Short Drama sponsorship package?') }, 'What\'s the Motherhood Short Drama sponsorship package?'),
+        el('button', { onclick: () => askQuick('Walk me through setting up my first campaign') }, 'Walk me through setting up my first campaign'),
+        el('button', { onclick: () => askQuick('What does Apollo Generate do and how much does it cost?') }, 'What does Apollo Generate do and how much does it cost?'),
+      ),
+    );
+    body.append(welcome);
+    return;
+  }
+
+  for (const m of assistantState.messages) {
+    const cls = m.role === 'user' ? 'assistant-msg user'
+             : m.role === 'error' ? 'assistant-msg bot error'
+             : 'assistant-msg bot';
+    const node = el('div', { class: cls });
+    node.textContent = m.text;
+    if (m.citations && m.citations.length) {
+      const cites = el('div', { class: 'citations' });
+      for (const c of m.citations) {
+        const label = `${(c.title || c.filename || 'deck').replace(/\.pptx$/i, '')} · slide ${c.slide_number}`;
+        cites.append(el('span', { class: 'cite-chip', title: c.filename }, label));
+      }
+      node.append(cites);
+    }
+    body.append(node);
+  }
+
+  if (assistantState.pending) {
+    const t = el('div', { class: 'assistant-typing' });
+    t.append(el('span', {}), el('span', {}), el('span', {}));
+    body.append(t);
+  }
+  body.scrollTop = body.scrollHeight;
+}
+
+function askQuick(q) {
+  sendAssistantMessage(q);
+}
+
+async function sendAssistantMessage(question) {
+  assistantState.messages.push({ role: 'user', text: question });
+  assistantState.pending = true;
+  renderAssistantBody();
+  try {
+    const r = await api('/assistant/chat', { method: 'POST', body: JSON.stringify({ question }) });
+    assistantState.pending = false;
+    assistantState.messages.push({ role: 'bot', text: r.answer || '(empty response)', citations: r.citations || [] });
+  } catch (e) {
+    assistantState.pending = false;
+    const msg = /credit balance/i.test(e.message)
+      ? 'Anthropic credits are depleted — the assistant can\'t answer until an admin tops up. No charge was made for this question.'
+      : e.message;
+    assistantState.messages.push({ role: 'error', text: msg });
+  }
+  renderAssistantBody();
 }
 
 function routeView() {
@@ -1325,6 +1478,12 @@ async function bootstrap() {
 function logout() {
   api('/auth/logout', { method: 'POST' }).catch(() => {});
   state.token = ''; localStorage.removeItem('token');
+  // Tear down the assistant widget so it does not persist past logout.
+  const fab = document.getElementById('assistant-fab');
+  if (fab) fab.remove();
+  closeAssistant();
+  assistantState.fab = null;
+  assistantState.messages = [];
   render();
 }
 
