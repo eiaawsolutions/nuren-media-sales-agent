@@ -67,3 +67,25 @@ input[type=text], input[type=email], input[type=password], input[type=url], sele
 }
 .row { display:flex; gap:10px; }
 .row > * { flex:1; }
+
+/* --- wide detail page (campaign view) --- */
+.main.wide { padding-left:24px; padding-right:24px; max-width:none; }
+
+/* --- enroll table (campaign detail) --- */
+.enroll-table-wrap { overflow-x:auto; border:1px solid var(--line); border-radius:14px; background:#fff; }
+.enroll-table { width:100%; border-collapse:collapse; margin:0; border:none; border-radius:0; }
+.enroll-table thead th { position:sticky; top:0; background:var(--cream); z-index:1; }
+.enroll-table th.col-check, .enroll-table td.col-check { width:44px; text-align:center; padding-right:0; }
+.enroll-table th.col-email, .enroll-table td.col-email { font-family: 'SFMono-Regular', ui-monospace, Menlo, monospace; font-size:12px; color:var(--ink-2); }
+.enroll-table tbody tr { cursor:pointer; transition:background .12s ease; }
+.enroll-table tbody tr:hover { background:var(--cream); }
+.enroll-table tbody tr.selected { background:#f1ecff; }
+.enroll-table tbody tr.selected:hover { background:#e8e1ff; }
+.enroll-table input[type=checkbox] { width:16px; height:16px; accent-color:var(--ink); cursor:pointer; vertical-align:middle; }
+.enroll-toolbar { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--line); background:#fff; border-radius:14px 14px 0 0; gap:14px; flex-wrap:wrap; }
+.enroll-toolbar .count-badge { font-size:12.5px; color:var(--ink-2); font-weight:500; }
+.enroll-toolbar .count-badge b { color:var(--ink); font-weight:700; }
+.enroll-search { flex:1; max-width:280px; margin:0; padding:8px 12px; font-size:13px; border:1px solid var(--line); border-radius:8px; background:var(--cream); }
+.enroll-empty { padding:40px 24px; text-align:center; color:var(--ink-2); font-size:13.5px; }
+.muted-cell { color:#9a8c6e; font-style:italic; font-size:12px; }
+.signal-pill { display:inline-block; padding:2px 8px; font-size:11px; border-radius:6px; background:#fdecd1; color:#8c5b0e; font-weight:500; white-space:nowrap; }

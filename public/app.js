@@ -122,7 +122,10 @@ function Shell() {
   side.append(nav, el('div', { class: 'user' }, `${state.user?.displayName || state.user?.username || ''} — `, el('a', { href: '#', onclick: (e) => { e.preventDefault(); logout(); } }, 'Sign out')));
   shell.append(side);
 
-  const main = el('main', { class: 'main' });
+  // Campaign detail view uses a wider layout because it stacks a gen card +
+  // enroll table + enrollment list side-by-side at full page width.
+  const isWide = state.route.startsWith('#/campaign/');
+  const main = el('main', { class: 'main' + (isWide ? ' wide' : '') });
   shell.append(main);
 
   const view = routeView();
@@ -721,23 +724,143 @@ function CampaignDetailView(id) {
       enrollCard.innerHTML = '';
       enrollCard.append(
         el('h3', {}, 'Enroll leads'),
-        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Pick leads to enroll into this campaign\'s sequence. Already-enrolled or unsubscribed leads are skipped.'),
+        el('p', { class: 'sub', style: 'margin:0 0 12px' }, 'Pick leads to enroll into this campaign\'s sequence. Already-enrolled or unsubscribed leads are skipped server-side.'),
       );
-      const select = el('select', { multiple: '', size: '8', style: 'width:100%; padding:8px; font-size:13px' });
+
       const leads = await api('/leads');
-      for (const l of leads) {
-        select.append(el('option', { value: l.id }, `${l.name} — ${l.account_name || ''} (${l.email || 'no email'}) [${l.lead_type || 'cold'}]`));
-      }
-      const enrollBtn = el('button', { class: 'btn primary', style: 'margin-top:10px', onclick: async () => {
-        const ids = Array.from(select.selectedOptions).map(o => parseInt(o.value, 10));
-        if (!ids.length) return alert('Pick at least one lead.');
+      const selected = new Set();
+
+      // Toolbar: search + select-all + live count + primary CTA
+      const searchInput = el('input', { type: 'text', class: 'enroll-search', placeholder: 'Filter by name, company, email, title…' });
+      const selectAllCheckbox = el('input', { type: 'checkbox' });
+      const countLabel = el('span', { class: 'count-badge' }, '0 selected');
+      const enrollBtn = el('button', { class: 'btn primary', disabled: true, onclick: async () => {
+        const ids = Array.from(selected);
+        if (!ids.length) return;
+        enrollBtn.disabled = true;
         try {
           const r = await api('/campaigns/' + id + '/enroll', { method: 'POST', body: JSON.stringify({ lead_ids: ids }) });
-          alert(`Enrolled ${r.enrolled}, skipped ${r.skipped}` + (r.reasons ? ' (' + Object.entries(r.reasons).map(([k, v]) => `${v} ${k}`).join(', ') + ')' : ''));
+          const breakdown = r.reasons ? ' (' + Object.entries(r.reasons).map(([k, v]) => `${v} ${k}`).join(', ') + ')' : '';
+          alert(`Enrolled ${r.enrolled}, skipped ${r.skipped}${breakdown}`);
           load();
-        } catch (e) { alert('Enroll failed: ' + e.message); }
+        } catch (e) { alert('Enroll failed: ' + e.message); enrollBtn.disabled = false; }
       } }, 'Enroll selected');
-      enrollCard.append(select, enrollBtn);
+
+      const toolbar = el('div', { class: 'enroll-toolbar' },
+        searchInput,
+        el('div', { style: 'display:flex; align-items:center; gap:14px' },
+          countLabel,
+          enrollBtn,
+        ),
+      );
+
+      // Table body
+      const tbody = el('tbody');
+      const tableWrap = el('div', { class: 'enroll-table-wrap' });
+      const emptyState = el('div', { class: 'enroll-empty' }, leads.length === 0
+        ? 'No leads yet. Click "Apollo Generate" above to fetch verified HOT leads.'
+        : 'No leads match your filter.');
+
+      function updateCount() {
+        const n = selected.size;
+        countLabel.innerHTML = n
+          ? `<b>${n}</b> selected of ${leads.length}`
+          : `0 selected of ${leads.length}`;
+        enrollBtn.disabled = n === 0;
+        // Sync select-all state
+        const visibleIds = Array.from(tbody.querySelectorAll('tr[data-lead-id]')).map(tr => parseInt(tr.dataset.leadId, 10));
+        const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(lid => selected.has(lid));
+        const someVisibleSelected = visibleIds.some(lid => selected.has(lid));
+        selectAllCheckbox.checked = allVisibleSelected;
+        selectAllCheckbox.indeterminate = someVisibleSelected && !allVisibleSelected;
+      }
+
+      function renderRow(l) {
+        const heatBadge = (l.lead_type || 'cold').toLowerCase() === 'hot'
+          ? el('span', { class: 'badge warn' }, 'HOT')
+          : el('span', { class: 'badge' }, 'cold');
+        const emailCell = l.email
+          ? el('td', { class: 'col-email' }, l.email)
+          : el('td', { class: 'col-email' }, el('span', { class: 'muted-cell' }, 'no email'));
+        const signalCell = l.buying_signal
+          ? el('td', {}, el('span', { class: 'signal-pill', title: l.buying_signal }, l.buying_signal.length > 30 ? l.buying_signal.slice(0, 30) + '…' : l.buying_signal))
+          : el('td', {}, el('span', { class: 'muted-cell' }, '—'));
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = selected.has(l.id);
+        const tr = el('tr', { 'data-lead-id': String(l.id) },
+          el('td', { class: 'col-check' }, cb),
+          el('td', {}, el('a', { href: '#/lead/' + l.id, onclick: (ev) => ev.stopPropagation() }, l.name)),
+          el('td', {}, l.account_name || el('span', { class: 'muted-cell' }, '—')),
+          el('td', {}, l.title || el('span', { class: 'muted-cell' }, '—')),
+          emailCell,
+          el('td', {}, heatBadge),
+          signalCell,
+          el('td', { style: 'font-size:11.5px; color:#7b708f; white-space:nowrap' }, l.source || 'manual'),
+        );
+        if (cb.checked) tr.classList.add('selected');
+
+        const toggle = () => {
+          if (selected.has(l.id)) { selected.delete(l.id); cb.checked = false; tr.classList.remove('selected'); }
+          else { selected.add(l.id); cb.checked = true; tr.classList.add('selected'); }
+          updateCount();
+        };
+        // Clicking anywhere on the row toggles; clicks on the <a> and checkbox are handled separately
+        tr.addEventListener('click', (ev) => {
+          if (ev.target.tagName === 'A' || ev.target.tagName === 'INPUT') return;
+          toggle();
+        });
+        cb.addEventListener('click', (ev) => { ev.stopPropagation(); toggle(); });
+        return tr;
+      }
+
+      function renderTable() {
+        tbody.innerHTML = '';
+        const q = searchInput.value.trim().toLowerCase();
+        const filtered = q
+          ? leads.filter(l => [l.name, l.account_name, l.email, l.title].some(v => (v || '').toLowerCase().includes(q)))
+          : leads;
+        if (filtered.length === 0) {
+          tableWrap.innerHTML = '';
+          tableWrap.append(emptyState);
+          return;
+        }
+        for (const l of filtered) tbody.append(renderRow(l));
+        // Rebuild table structure if wrap shows empty state
+        if (!tableWrap.querySelector('table')) {
+          tableWrap.innerHTML = '';
+          const tbl = el('table', { class: 'enroll-table' });
+          tbl.append(
+            el('thead', {}, el('tr', {},
+              el('th', { class: 'col-check' }, selectAllCheckbox),
+              el('th', {}, 'Name'),
+              el('th', {}, 'Company'),
+              el('th', {}, 'Title'),
+              el('th', { class: 'col-email' }, 'Email'),
+              el('th', {}, 'Heat'),
+              el('th', {}, 'Signal'),
+              el('th', {}, 'Source'),
+            )),
+            tbody,
+          );
+          tableWrap.append(tbl);
+        }
+        updateCount();
+      }
+
+      searchInput.addEventListener('input', renderTable);
+      selectAllCheckbox.addEventListener('change', () => {
+        const visibleIds = Array.from(tbody.querySelectorAll('tr[data-lead-id]')).map(tr => parseInt(tr.dataset.leadId, 10));
+        if (selectAllCheckbox.checked) {
+          for (const lid of visibleIds) selected.add(lid);
+        } else {
+          for (const lid of visibleIds) selected.delete(lid);
+        }
+        // Re-render rows to refresh their checkbox + row-highlight state
+        renderTable();
+      });
+
+      renderTable();
+      enrollCard.append(toolbar, tableWrap);
 
       enrollList.innerHTML = '';
       enrollList.append(el('h3', {}, `Enrollments (${c.enrollments.length})`));
