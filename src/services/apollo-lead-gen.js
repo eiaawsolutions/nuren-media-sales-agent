@@ -7,22 +7,31 @@ import db from '../db/index.js';
 /**
  * Apollo.io lead generation (Path C — runs alongside Claude web_search).
  *
- * Apollo's `mixed_people/search` returns pre-verified B2B leads matched to
- * structured ICP filters (job title + seniority + geography + industry +
- * company size). Faster + more reliable email coverage than LLM discovery,
- * but less nuanced — use for high-volume well-defined ICPs; keep
- * ai-lead-gen.js for nuanced, non-obvious personas.
+ * Apollo's API has a two-step architecture that we mirror here:
  *
- * Every returned lead runs through the same `verifyLead()` gate the CSV
- * and AI-generated paths use. Apollo leads almost always pass cleanly
- * (verified LinkedIn URL + 2 sources: Apollo's record + the LinkedIn URL
- * itself), but the gate is still authoritative — if Apollo hands back a
- * person without a /in/ URL, we discard.
+ *   1. POST /api/v1/mixed_people/api_search
+ *      — Structured search by title, seniority, location, company size.
+ *      — Returns candidate records WITHOUT email or phone.
+ *      — Does NOT consume Apollo credits.
+ *
+ *   2. POST /api/v1/people/match  (one call per candidate we want to keep)
+ *      — Enriches a single person by apollo id (or linkedin_url, email, etc.)
+ *      — With reveal_personal_emails:true + reveal_phone_number:true,
+ *        returns the verified email and any available phone numbers.
+ *      — CONSUMES Apollo credits per reveal.
+ *
+ * Every enriched lead passes through the same verifyLead() gate as CSV and
+ * AI-generated paths. Because Apollo always returns a real linkedin.com/in/
+ * URL and a company domain, leads almost always satisfy the 2-source rule.
+ *
+ * Reference docs (verified 2026-04-24):
+ *   https://docs.apollo.io/reference/people-api-search
+ *   https://docs.apollo.io/reference/people-enrichment
  */
 
 const APOLLO_BASE = 'https://api.apollo.io/api/v1';
 const MAX_LEADS_PER_CALL = 15;
-const APOLLO_CREDIT_COST_USD = 0.05; // rough per-email-unlock estimate; tune against actual plan
+const APOLLO_CREDIT_COST_USD = 0.05; // rough per-enrichment estimate; actual cost comes from Apollo billing
 
 export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) {
   const numLeads = Math.min(Math.max(parseInt(count, 10) || 5, 1), MAX_LEADS_PER_CALL);
@@ -46,14 +55,49 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     per_page: numLeads,
   };
 
-  let response;
+  // Step 1 — zero-credit structured search. Returns candidate records with
+  // id/name/title/company/linkedin_url but NO email or phone.
+  let searchResponse;
   try {
-    response = await apolloFetch('/mixed_people/search', apiKey, searchBody);
+    searchResponse = await apolloFetch('/mixed_people/api_search', apiKey, searchBody);
   } catch (err) {
     throw rewriteApolloError(err);
   }
 
-  const people = Array.isArray(response?.people) ? response.people : [];
+  const candidates = Array.isArray(searchResponse?.people) ? searchResponse.people : [];
+
+  // Step 2 — enrichment per candidate. Each call burns Apollo credits to reveal
+  // the email + phone. We do this sequentially rather than in parallel so one
+  // 429 doesn't cascade and so operators can watch the credit burn visibly.
+  const enrichedPeople = [];
+  let enrichmentCalls = 0;
+  for (const candidate of candidates) {
+    try {
+      const enriched = await apolloFetch('/people/match', apiKey, {
+        id: candidate.id,
+        reveal_personal_emails: true,
+        reveal_phone_number: true,
+      });
+      enrichmentCalls++;
+      // The enrichment response nests the person under `person`; fall back to
+      // top-level if the API shape changes.
+      enrichedPeople.push(enriched?.person || enriched);
+    } catch (err) {
+      // If we hit a rate limit or credit block mid-batch, stop enrichment and
+      // surface what we've got. Keep unenriched candidates as "no email" leads
+      // so the verification gate can still accept LinkedIn-only records.
+      const rewritten = rewriteApolloError(err);
+      if (rewritten.code === 'apollo_credits_depleted' || rewritten.code === 'apollo_rate_limited') {
+        console.warn(`[apollo-lead-gen] enrichment halted at ${enrichmentCalls}/${candidates.length}: ${rewritten.message}`);
+        // Push the raw candidate so we keep the LinkedIn-only lead.
+        enrichedPeople.push(candidate);
+        break;
+      }
+      // Other errors — push raw candidate, continue.
+      console.warn(`[apollo-lead-gen] enrichment failed for ${candidate.id}: ${err.message}`);
+      enrichedPeople.push(candidate);
+    }
+  }
 
   logAICost({
     userId,
@@ -63,10 +107,9 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     inputTokens: 0,
     outputTokens: 0,
     webSearchRequests: 0,
-    // Cost approximation: 1 credit per person returned with a revealed email.
-    // True cost comes from the Apollo billing page; this is for the budget
-    // circuit breaker only.
-    costOverride: people.filter(p => p.email).length * APOLLO_CREDIT_COST_USD,
+    // Cost driver is enrichment calls, not search results. One /people/match
+    // call per candidate we kept, each at ~1 Apollo credit ≈ APOLLO_CREDIT_COST_USD.
+    costOverride: enrichmentCalls * APOLLO_CREDIT_COST_USD,
   });
 
   const accepted = [];
@@ -74,7 +117,7 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   const seenInBatch = new Set();
   const existingEmails = db.prepare("SELECT email FROM leads WHERE user_id = ? AND email != ''").all(userId).map(r => r.email.toLowerCase());
 
-  for (const person of people) {
+  for (const person of enrichedPeople) {
     const candidate = apolloPersonToLead(person, campaign);
 
     const emailKey = (candidate.email || '').toLowerCase().trim();
@@ -116,7 +159,8 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     rejected: rejected.length,
     source: 'apollo',
     requested: numLeads,
-    total_returned: people.length,
+    total_returned: candidates.length,
+    enrichment_calls: enrichmentCalls,
     leads: accepted,
     rejections: rejected,
   };
@@ -129,12 +173,18 @@ function getApolloKey() {
 }
 
 /**
- * Compose Apollo search filters from a Nuren campaign. Apollo's search is
- * structured — we map the campaign's ICP fields to Apollo's native fields:
- *   target_persona   → person_titles + person_seniorities
- *   target_industry  → q_organization_keyword_tags (loose industry match)
- *   target_budget_tier → organization_num_employees_ranges (proxy for company size)
- *   geography        → person_locations (MY/SG/TH default)
+ * Compose Apollo search filters from a Nuren campaign. Only fields that are
+ * documented in Apollo's people-api-search reference are used here — earlier
+ * drafts had an undocumented `q_organization_keyword_tags` that caused 422s.
+ *
+ *   target_persona     → person_titles + person_seniorities (documented)
+ *   target_budget_tier → organization_num_employees_ranges (documented)
+ *   geography          → person_locations (documented, MY/SG/TH default)
+ *
+ * Industry filtering is intentionally dropped — Apollo's industry taxonomy
+ * requires specific organization_industry_tag_ids which we don't have a
+ * canonical list for, and the free-text industry keyword field is not part
+ * of the public search schema. Operators narrow via target_persona instead.
  */
 function buildApolloFilters(campaign) {
   const f = {};
@@ -147,10 +197,6 @@ function buildApolloFilters(campaign) {
   // Seniorities — if we can infer from persona, narrow further for precision
   const seniorities = inferSeniorities(campaign.target_persona);
   if (seniorities.length) f.person_seniorities = seniorities;
-
-  // Industry — keyword match on the organization record
-  const industryKeywords = expandIndustryKeywords(campaign.target_industry);
-  if (industryKeywords.length) f.q_organization_keyword_tags = industryKeywords;
 
   // Geography — Nuren's primary universe is MY/SG/TH; allow override via notes field
   f.person_locations = ['Malaysia', 'Singapore', 'Thailand'];
@@ -182,17 +228,6 @@ function inferSeniorities(persona) {
     digital_marketer: ['manager', 'director', 'head'],
   };
   return map[persona] || ['manager', 'director', 'head'];
-}
-
-function expandIndustryKeywords(industry) {
-  const map = {
-    fmcg: ['consumer goods', 'consumer products', 'FMCG', 'beauty', 'personal care', 'baby care'],
-    healthcare: ['healthcare', 'maternity', 'wellness', 'pharmaceutical', 'medical'],
-    education: ['education', 'e-learning', 'childcare', 'family services'],
-    ecommerce: ['e-commerce', 'online retail', 'DTC', 'retail'],
-    other: [],
-  };
-  return map[industry] || [];
 }
 
 function mapBudgetTierToEmployeeRanges(tier) {
@@ -294,6 +329,7 @@ async function apolloFetch(path, apiKey, body) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
       'Cache-Control': 'no-cache',
       'X-Api-Key': apiKey,
     },
@@ -301,9 +337,10 @@ async function apolloFetch(path, apiKey, body) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data?.error || data?.message || `Apollo HTTP ${res.status}`);
+    const err = new Error(data?.error || data?.message || `Apollo HTTP ${res.status} on ${path}`);
     err.status = res.status;
     err.payload = data;
+    err.path = path;
     throw err;
   }
   return data;
@@ -312,12 +349,14 @@ async function apolloFetch(path, apiKey, body) {
 function rewriteApolloError(err) {
   const status = err.status;
   const msg = err.message || '';
+  const pay = JSON.stringify(err.payload || {}).toLowerCase();
+
   if (status === 401 || status === 403) {
     const e = new Error('Apollo API key is invalid or lacks permission for this endpoint. Generate a new key at https://app.apollo.io/#/settings/integrations/api and re-save in Settings.');
     e.code = 'apollo_auth_failed';
     return e;
   }
-  if (status === 402 || /credit|quota|limit/i.test(msg)) {
+  if (status === 402 || /credit|quota|insufficient/i.test(msg + pay)) {
     const e = new Error('Apollo credit/quota exhausted. Top up at https://app.apollo.io/#/settings/plans or wait for monthly reset.');
     e.code = 'apollo_credits_depleted';
     e.billingUrl = 'https://app.apollo.io/#/settings/plans';
@@ -326,6 +365,13 @@ function rewriteApolloError(err) {
   if (status === 429) {
     const e = new Error('Apollo rate limit hit. Wait 60 seconds and try again.');
     e.code = 'apollo_rate_limited';
+    return e;
+  }
+  // 404 or 422 usually means we hit an undocumented endpoint or sent the wrong
+  // field names. Bubble the raw Apollo message up so we can debug schema drift.
+  if (status === 404 || status === 422) {
+    const e = new Error(`Apollo schema mismatch on ${err.path || 'endpoint'}: ${msg}. This is a server bug — check Apollo docs for endpoint/field changes.`);
+    e.code = 'apollo_schema_mismatch';
     return e;
   }
   return err;

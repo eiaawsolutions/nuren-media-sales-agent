@@ -718,7 +718,7 @@ function CampaignDetailView(id) {
         genStatus.textContent = `Apollo searching ${n} leads — ~2–5 seconds…`;
         try {
           const r = await api('/campaigns/' + id + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count: n }) });
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ Apollo returned ${r.total_returned}, persisted <b>${r.generated}</b></span> · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
+          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ Apollo found ${r.total_returned}, enriched ${r.enrichment_calls}, persisted <b>${r.generated}</b></span> · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
           load();
         } catch (e) {
           if (e.code === 'apollo_not_configured') {

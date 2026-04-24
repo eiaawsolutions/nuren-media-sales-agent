@@ -130,6 +130,7 @@ router.post('/:id/apollo-generate', async (req, res) => {
       : err.code === 'apollo_credits_depleted' ? 402
       : err.code === 'apollo_auth_failed' ? 401
       : err.code === 'apollo_rate_limited' ? 429
+      : err.code === 'apollo_schema_mismatch' ? 502
       : 500;
     res.status(status).json({ error: err.message, code: err.code, billingUrl: err.billingUrl });
   }
