@@ -11,6 +11,7 @@ export const SENSITIVE_KEYS = [
   'api_key',
   'resend_api_key',
   'voyage_api_key',
+  'apollo_api_key',
   'smtp_pass',
   'linkedin_cookie',
   'meta_access_token',

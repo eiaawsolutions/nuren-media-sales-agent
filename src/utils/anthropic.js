@@ -40,8 +40,10 @@ export function calculateCost(model, inputTokens = 0, outputTokens = 0, webSearc
        + (webSearchRequests * WEB_SEARCH_COST);
 }
 
-export function logAICost({ userId, campaignId, taskType, model, inputTokens = 0, outputTokens = 0, webSearchRequests = 0 }) {
-  const cost = calculateCost(model, inputTokens, outputTokens, webSearchRequests);
+export function logAICost({ userId, campaignId, taskType, model, inputTokens = 0, outputTokens = 0, webSearchRequests = 0, costOverride }) {
+  // costOverride lets non-Anthropic sources (Apollo, enrichment APIs) log
+  // flat-rate costs without going through token math.
+  const cost = typeof costOverride === 'number' ? costOverride : calculateCost(model, inputTokens, outputTokens, webSearchRequests);
   db.prepare(
     'INSERT INTO ai_cost_log (user_id, campaign_id, task_type, model, input_tokens, output_tokens, total_tokens, cost_usd, web_search_requests) VALUES (?,?,?,?,?,?,?,?,?)'
   ).run(userId || null, campaignId || null, taskType, model, inputTokens, outputTokens, inputTokens + outputTokens, cost, webSearchRequests);

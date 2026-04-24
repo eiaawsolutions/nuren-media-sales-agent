@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db/index.js';
 import { ensureDefaultSequence, listSequences, enrollLeads } from '../services/sequences.js';
 import { generateLeadsForCampaign } from '../services/ai-lead-gen.js';
+import { generateLeadsViaApollo } from '../services/apollo-lead-gen.js';
 
 const router = Router();
 
@@ -99,6 +100,36 @@ router.post('/:id/generate-leads', async (req, res) => {
       : err.code === 'anthropic_auth_failed' ? 401
       : err.code === 'anthropic_rate_limited' ? 429
       : err.code === 'anthropic_overloaded' ? 503
+      : 500;
+    res.status(status).json({ error: err.message, code: err.code, billingUrl: err.billingUrl });
+  }
+});
+
+/**
+ * POST /api/campaigns/:id/apollo-generate
+ * Apollo.io-backed lead generation. Runs alongside /generate-leads — same
+ * campaign ICP fields, faster + verified emails, but less nuance. Returns
+ * the same shape as /generate-leads so the UI can share handlers.
+ *
+ * Body: { count?: 1..15 }  — defaults to 5. Server-clamped at 15.
+ * Returns: { generated, rejected, source, requested, total_returned, leads, rejections }
+ */
+router.post('/:id/apollo-generate', async (req, res) => {
+  try {
+    const campaignId = parseInt(req.params.id, 10);
+    if (!campaignId) return res.status(400).json({ error: 'invalid campaign id' });
+    const result = await generateLeadsViaApollo({
+      userId: req.user.id,
+      campaignId,
+      count: req.body?.count || 5,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[campaigns/apollo-generate]', err.message);
+    const status = err.code === 'apollo_not_configured' ? 503
+      : err.code === 'apollo_credits_depleted' ? 402
+      : err.code === 'apollo_auth_failed' ? 401
+      : err.code === 'apollo_rate_limited' ? 429
       : 500;
     res.status(status).json({ error: err.message, code: err.code, billingUrl: err.billingUrl });
   }
