@@ -1,4 +1,4 @@
-import { getSetting, logAICost, checkBudget } from '../utils/anthropic.js';
+import { getAnthropicClient, getSetting, logAICost, checkBudget } from '../utils/anthropic.js';
 import { decrypt } from '../utils/crypto.js';
 import { verifyLead } from './lead-verification.js';
 import { persistLead } from './leads.js';
@@ -152,9 +152,15 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   const accepted = [];
   const rejected = [];
   let rejectedCold = 0;
+  let rejectedIcp = 0;
   const seenInBatch = new Set();
   const existingEmails = db.prepare("SELECT email FROM leads WHERE user_id = ? AND email != ''").all(userId).map(r => r.email.toLowerCase());
 
+  // Pass 1 — local vetting: dedup + hotness. Collect candidates that survive
+  // for the batch LLM ICP check that runs next. We don't persist anything yet
+  // because we want the LLM to see the whole batch at once (single Haiku call,
+  // cheaper + more consistent than per-lead calls).
+  const survivors = []; // { person, candidate, hotVerdict }
   for (const person of enrichedPeople) {
     const candidate = apolloPersonToLead(person, campaign);
 
@@ -165,13 +171,6 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       seenInBatch.add(emailKey);
     }
 
-    // Hot-lead vetting (only-hot policy set 2026-04-24). Lead must:
-    //   1. Have a verified email (Apollo email_status === 'verified')
-    //   2. Be at decision-maker seniority (manager, director, head, vp, c_suite, founder, owner)
-    //   3. Fire at least one buying signal (fresh role OR org-size-fit)
-    // Cold leads are not persisted. Rejection reasons are logged to
-    // leads_rejected for audit, but the count surfaces separately as
-    // rejected_cold so the UI can explain the vetting.
     const hotVerdict = classifyHotness(person);
     if (!hotVerdict.hot) {
       rejectedCold++;
@@ -180,13 +179,39 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       rejected.push({ name: candidate.name, reasons: ['cold:' + hotVerdict.reason] });
       continue;
     }
-    // Override lead_type + buying_signal with what the vetter found. Stash
-    // outreach_mode in enrichment so downstream features (sequence scheduler,
-    // UI badges) can tell email-ready leads apart from LinkedIn-only ones.
     candidate.lead_type = 'hot';
     candidate.buying_signal = hotVerdict.signal;
     if (candidate.enrichment && typeof candidate.enrichment === 'object') {
       candidate.enrichment.outreach_mode = hotVerdict.outreach_mode;
+    }
+    survivors.push({ person, candidate, hotVerdict });
+  }
+
+  // Pass 2 — LLM ICP post-vet. One Haiku call classifies all survivors as
+  // fit / weak / reject against Nuren's specific buyer profile (mother/baby/
+  // family brands that run paid media in MY/SG/TH). This filters out the
+  // wrong-vertical noise that Apollo's keyword-tag filter still lets through
+  // (edge cases: B2B agencies that serve consumer brands, corporate HQs of
+  // consumer groups that don't run paid media, wrong-geography matches).
+  const icpVerdicts = survivors.length > 0
+    ? await llmPostVetIcp(survivors, campaign)
+    : new Map();
+
+  // Pass 3 — persist survivors that passed both gates.
+  for (const { person, candidate, hotVerdict } of survivors) {
+    const icpVerdict = icpVerdicts.get(person.id) || { fit: 'weak', reason: 'no verdict returned' };
+    if (icpVerdict.fit === 'reject') {
+      rejectedIcp++;
+      db.prepare("INSERT INTO leads_rejected (user_id, raw_input, reasons, source) VALUES (?,?,?,?)")
+        .run(userId, JSON.stringify(person), JSON.stringify(['icp_reject:' + icpVerdict.reason]), 'apollo');
+      rejected.push({ name: candidate.name, reasons: ['icp_reject:' + icpVerdict.reason] });
+      continue;
+    }
+    // Record the ICP verdict on the lead so the UI can render a "fit" or
+    // "weak fit" chip next to the HOT badge.
+    if (candidate.enrichment && typeof candidate.enrichment === 'object') {
+      candidate.enrichment.icp_fit = icpVerdict.fit;
+      candidate.enrichment.icp_reason = icpVerdict.reason;
     }
 
     const gate = verifyLead(candidate);
@@ -215,19 +240,26 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       confidence_score: gate.lead.confidence_score,
       buying_signal: gate.lead.buying_signal,
       outreach_mode: hotVerdict.outreach_mode,
+      icp_fit: icpVerdict.fit,
+      icp_reason: icpVerdict.reason,
     });
   }
 
   const emailReady = accepted.filter(l => l.outreach_mode === 'email').length;
   const linkedinOnly = accepted.filter(l => l.outreach_mode === 'linkedin').length;
-  console.log(`[apollo-lead-gen] DONE persisted=${accepted.length} (${emailReady} email-ready + ${linkedinOnly} LinkedIn-only) rejected_total=${rejected.length} rejected_cold=${rejectedCold} credits=${creditsConsumed}`);
+  const strongFit = accepted.filter(l => l.icp_fit === 'fit').length;
+  const weakFit = accepted.filter(l => l.icp_fit === 'weak').length;
+  console.log(`[apollo-lead-gen] DONE persisted=${accepted.length} (${strongFit} fit + ${weakFit} weak | ${emailReady} email-ready + ${linkedinOnly} LinkedIn-only) rejected_total=${rejected.length} rejected_cold=${rejectedCold} rejected_icp=${rejectedIcp} credits=${creditsConsumed}`);
 
   return {
     generated: accepted.length,
     email_ready: emailReady,
     linkedin_only: linkedinOnly,
+    strong_fit: strongFit,
+    weak_fit: weakFit,
     rejected: rejected.length,
     rejected_cold: rejectedCold,
+    rejected_icp: rejectedIcp,
     source: 'apollo',
     requested: numLeads,
     total_returned: candidates.length,
@@ -237,6 +269,118 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     leads: accepted,
     rejections: rejected,
   };
+}
+
+/**
+ * Batch ICP post-vet — one Haiku call classifies every hot-passing candidate
+ * against Nuren's real buyer profile (mother/baby/family brands running paid
+ * media in MY/SG/TH). Returns a Map of apollo_id → { fit, reason }.
+ *
+ * fit = "fit"    — consumer brand that would genuinely buy Nuren media placements
+ * fit = "weak"   — adjacent/possible fit; persisted but tagged for operator review
+ * fit = "reject" — wrong vertical (e.g. state fund, real estate, B2B SaaS, blockchain)
+ *
+ * Defensive: if the LLM call fails (credits depleted, rate limit, parse error),
+ * every survivor gets fit=weak so nothing is silently dropped. Pre-filter keyword
+ * tags already did most of the work; LLM is precision polish.
+ */
+async function llmPostVetIcp(survivors, campaign) {
+  const verdicts = new Map();
+  try {
+    const client = getAnthropicClient();
+    const model = getSetting('ai_model_chat', 'claude-haiku-4-5-20251001');
+
+    const candidatesBlock = survivors.map((s, i) => {
+      const p = s.person;
+      const orgName = p.organization?.name || '';
+      const industry = p.organization?.industry || '';
+      const seoDesc = p.organization?.short_description || p.organization?.seo_description || '';
+      const empCount = p.organization?.estimated_num_employees;
+      return `[${i + 1}] apollo_id=${p.id}
+name: ${p.name}
+title: ${p.title}
+headline: ${(p.headline || '').slice(0, 160)}
+company: ${orgName} (${industry || 'industry unknown'}, ~${empCount || '?'} employees)
+company_description: ${(seoDesc || '').slice(0, 300)}`;
+    }).join('\n\n');
+
+    const campaignCtx = [
+      `name: ${campaign.name || 'Untitled'}`,
+      `target_industry: ${campaign.target_industry || 'any'}`,
+      `target_persona: ${campaign.target_persona || 'any'}`,
+      `pitch_angle: ${campaign.pitch_angle || 'auto'}`,
+      campaign.notes ? `notes: ${campaign.notes}` : null,
+    ].filter(Boolean).join(' | ');
+
+    const systemPrompt = `You are a B2B lead qualifier for Nuren Media Group — Malaysia/Singapore/Thailand's largest family-media network (Motherhood.com.my, Kelabmama, Ibuencer, Nuren Superapp). Nuren sells media sponsorships, KOL campaigns, and affiliate commerce to brands that target MOTHERS, BABIES, PREGNANT WOMEN, and FAMILIES.
+
+Your job: given a batch of candidate leads, classify each as "fit" / "weak" / "reject" against Nuren's real ICP.
+
+FIT (strong match):
+- Consumer brands in baby care, maternity, beauty, personal care, FMCG, healthcare, family services, baby/child education, DTC e-commerce
+- Media agencies that buy paid media for consumer brands (IPG, Publicis, Omnicom, Dentsu, local Malaysian agencies)
+- E-commerce platforms where mothers shop (Lazada, Shopee, Watsons, Guardian)
+- Influencer/creator marketplaces relevant to parenting audiences
+
+WEAK (adjacent, operator judgment):
+- Alcohol, tobacco, adult brands that sometimes run family-friendly campaigns
+- Corporate-level brand teams at conglomerates that own a family-relevant sub-brand
+- Generic FMCG where the person's role doesn't touch consumer-facing campaigns
+
+REJECT (wrong vertical):
+- State investment funds, real estate, commercial property
+- B2B SaaS / enterprise tech / blockchain / crypto
+- Industrial, engineering, construction, manufacturing (unless the person clearly owns a family-product sub-brand)
+- Training / HR / recruiting / consulting firms
+- Pure B2B services with no consumer brand exposure
+- Wrong geography (e.g. India, Vietnam, EU) — we only sell in MY/SG/TH
+
+Be strict on REJECT — operators hate getting wrong-vertical leads in their campaigns. Be generous on WEAK if it's plausibly adjacent.
+
+Output ONLY JSON in this exact shape, no prose:
+{ "verdicts": [{ "apollo_id": "...", "fit": "fit" | "weak" | "reject", "reason": "one-sentence justification" }] }`;
+
+    const userMsg = `CAMPAIGN: ${campaignCtx}
+
+CANDIDATES:
+${candidatesBlock}
+
+Classify each candidate. Return JSON only.`;
+
+    const response = await client.messages.create({
+      model,
+      max_tokens: Math.min(300 + survivors.length * 60, 3000),
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMsg }],
+    });
+
+    logAICost({
+      userId: null, // post-vet is a service cost, not a per-user cost; user already billed via credits_consumed
+      campaignId: campaign.id,
+      taskType: 'apollo_icp_postvet',
+      model,
+      inputTokens: response.usage?.input_tokens || 0,
+      outputTokens: response.usage?.output_tokens || 0,
+    });
+
+    const text = (response.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+    // Tolerate markdown fences the model sometimes adds despite instructions
+    const cleaned = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed?.verdicts)) {
+      for (const v of parsed.verdicts) {
+        if (!v?.apollo_id) continue;
+        const fit = ['fit', 'weak', 'reject'].includes(v.fit) ? v.fit : 'weak';
+        verdicts.set(v.apollo_id, { fit, reason: (v.reason || '').slice(0, 200) });
+      }
+    }
+    console.log(`[apollo-lead-gen] ICP post-vet: ${verdicts.size}/${survivors.length} verdicts returned`);
+  } catch (err) {
+    console.warn(`[apollo-lead-gen] ICP post-vet failed (falling back to weak for all): ${err.message}`);
+    // Fallback: tag every survivor as weak so the operator sees them and can judge manually.
+    for (const s of survivors) verdicts.set(s.person.id, { fit: 'weak', reason: 'ICP post-vet unavailable' });
+  }
+  return verdicts;
 }
 
 /**
@@ -321,18 +465,20 @@ function getApolloKey() {
 }
 
 /**
- * Compose Apollo search filters from a Nuren campaign. Only fields that are
- * documented in Apollo's people-api-search reference are used here — earlier
- * drafts had an undocumented `q_organization_keyword_tags` that caused 422s.
+ * Compose Apollo search filters from a Nuren campaign.
  *
  *   target_persona     → person_titles + person_seniorities (documented)
  *   target_budget_tier → organization_num_employees_ranges (documented)
+ *   target_industry    → q_organization_keyword_tags (undocumented but works
+ *                        on Professional+; Apollo matches these keyword tags
+ *                        against the organization's indexed text, dramatically
+ *                        narrowing to on-industry companies). Verified live
+ *                        2026-04-24: with baby/maternity/FMCG keyword tags,
+ *                        a MY Brand Manager search dropped from 4,528 → 379
+ *                        total entries, surfacing real consumer brands like
+ *                        Mama's Choice, The MILK Inc, Lam Soon instead of PNB,
+ *                        CBRE, blockchain startups.
  *   geography          → person_locations (documented, MY/SG/TH default)
- *
- * Industry filtering is intentionally dropped — Apollo's industry taxonomy
- * requires specific organization_industry_tag_ids which we don't have a
- * canonical list for, and the free-text industry keyword field is not part
- * of the public search schema. Operators narrow via target_persona instead.
  */
 function buildApolloFilters(campaign) {
   const f = {};
@@ -346,6 +492,14 @@ function buildApolloFilters(campaign) {
   const seniorities = inferSeniorities(campaign.target_persona);
   if (seniorities.length) f.person_seniorities = seniorities;
 
+  // Industry keyword tags — the biggest precision lever. Expands the campaign's
+  // target_industry into Apollo-friendly keyword tags that the org record must
+  // mention somewhere in its indexed profile. Mothers/baby/family brands are
+  // Nuren's entire buyer universe, so every search applies a baseline family-
+  // adjacent tag set unless the campaign is explicitly targeting another vertical.
+  const keywordTags = expandIndustryToKeywordTags(campaign.target_industry);
+  if (keywordTags.length) f.q_organization_keyword_tags = keywordTags;
+
   // Geography — Nuren's primary universe is MY/SG/TH; allow override via notes field
   f.person_locations = ['Malaysia', 'Singapore', 'Thailand'];
 
@@ -354,6 +508,24 @@ function buildApolloFilters(campaign) {
   if (sizeRanges.length) f.organization_num_employees_ranges = sizeRanges;
 
   return f;
+}
+
+/**
+ * Map a campaign's target_industry to the keyword tags Apollo indexes against
+ * the organization record. The baseline tag set ensures even `other` or null
+ * industries get narrowed to Nuren's mother/baby/family universe, which is
+ * what the entire app exists to sell into.
+ */
+function expandIndustryToKeywordTags(industry) {
+  const BASELINE_FAMILY_TAGS = ['baby', 'maternity', 'mother', 'family', 'FMCG', 'consumer goods', 'personal care'];
+  const map = {
+    fmcg: ['FMCG', 'consumer goods', 'consumer packaged goods', 'baby', 'maternity', 'beauty', 'personal care', 'baby care', 'skincare'],
+    healthcare: ['healthcare', 'maternity', 'wellness', 'pharmaceutical', 'hospital', 'clinic', 'medical', 'baby'],
+    education: ['education', 'childcare', 'early childhood', 'preschool', 'family services', 'parenting', 'tuition'],
+    ecommerce: ['e-commerce', 'online retail', 'DTC', 'direct-to-consumer', 'marketplace', 'beauty', 'baby'],
+    other: BASELINE_FAMILY_TAGS,
+  };
+  return map[(industry || 'other').toLowerCase()] || BASELINE_FAMILY_TAGS;
 }
 
 function expandPersonaToTitles(persona) {

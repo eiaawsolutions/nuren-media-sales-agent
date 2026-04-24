@@ -662,19 +662,22 @@ async function runApolloGenerate(campaignId, campaignName, onDone) {
       return;
     }
     if (r.generated === 0) {
-      const whyNot = r.rejected_cold > 0
-        ? `All ${r.rejected_cold} candidates were vetted out (no decision-maker seniority OR no buying signal).`
-        : `All ${r.rejected} candidates failed verification.`;
+      const parts = [];
+      if (r.rejected_cold) parts.push(`${r.rejected_cold} vetted cold`);
+      if (r.rejected_icp) parts.push(`${r.rejected_icp} wrong-vertical`);
+      const whyNot = parts.length ? `Breakdown: ${parts.join(', ')}.` : `All ${r.rejected} failed verification.`;
       alert(`0 leads kept.\n${whyNot}\n\nTry broadening the ICP or running again — Apollo rotates results.`);
       if (onDone) onDone();
       return;
     }
-    const breakdown = r.linkedin_only > 0
-      ? `\nBreakdown: ${r.email_ready} email-ready + ${r.linkedin_only} LinkedIn-only.`
-      : '';
-    const coldLine = r.rejected_cold ? `\n${r.rejected_cold} filtered as cold (no buying signal or junior role).` : '';
+    const fitLine = r.weak_fit ? `\nFit: ${r.strong_fit} strong + ${r.weak_fit} weak.` : '';
+    const channelLine = r.linkedin_only ? `\nChannel: ${r.email_ready} email-ready + ${r.linkedin_only} LinkedIn-only.` : '';
+    const filtered = [];
+    if (r.rejected_cold) filtered.push(`${r.rejected_cold} cold`);
+    if (r.rejected_icp) filtered.push(`${r.rejected_icp} wrong-vertical`);
+    const filteredLine = filtered.length ? `\nFiltered: ${filtered.join(', ')}.` : '';
     const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
-    alert(`Apollo searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${breakdown}${coldLine}\n\nOpen the Leads tab to see them.`);
+    alert(`Apollo searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${fitLine}${channelLine}${filteredLine}\n\nOpen the Leads tab to see them.`);
     if (onDone) onDone();
   } catch (e) {
     showGenerateLeadsError(e);
@@ -870,26 +873,37 @@ function CampaignDetailView(id) {
             load();
             return;
           }
-          // Empty result — every candidate failed hot-vetting. Not a silent
-          // success: tell the operator why and what to try next.
+          // Empty result — every candidate failed hot-vetting OR ICP post-vet.
           if (r.generated === 0) {
-            const whyNot = r.rejected_cold > 0
-              ? `All ${r.rejected_cold} candidates were vetted out (no decision-maker seniority OR no buying signal).`
-              : `All ${r.rejected} candidates failed verification (duplicate emails or missing LinkedIn).`;
-            genStatus.innerHTML = `<span style="color:#b86b0a">0 leads kept. ${whyNot} Try broadening the ICP or running again — Apollo rotates results.</span>`;
+            const reasons = [];
+            if (r.rejected_cold > 0) reasons.push(`${r.rejected_cold} vetted cold (junior role or no buying signal)`);
+            if (r.rejected_icp > 0) reasons.push(`${r.rejected_icp} wrong-vertical (not Nuren's buyer profile)`);
+            const whyNot = reasons.length ? reasons.join(', ') : `${r.rejected} failed verification (duplicate email or missing LinkedIn)`;
+            genStatus.innerHTML = `<span style="color:#b86b0a">0 leads kept. Breakdown: ${whyNot}. Try broadening the ICP or running again — Apollo rotates results.</span>`;
             load();
             return;
           }
 
           const rejectedCold = r.rejected_cold || 0;
+          const rejectedIcp = r.rejected_icp || 0;
+          const strongFit = r.strong_fit || 0;
+          const weakFit = r.weak_fit || 0;
           const emailReady = r.email_ready || 0;
           const linkedinOnly = r.linkedin_only || 0;
-          const breakdownLine = linkedinOnly > 0
-            ? ` (<span style="color:#1a6b4f">${emailReady} email-ready</span> + <span style="color:#8c5b0e">${linkedinOnly} LinkedIn-only</span>)`
+
+          const fitLine = weakFit > 0
+            ? ` · <span style="color:#1a6b4f">${strongFit} strong fit</span> + <span style="color:#8c5b0e">${weakFit} weak fit</span>`
             : '';
-          const vettingLine = rejectedCold > 0 ? ` · <span style="color:#b86b0a">${rejectedCold} filtered as cold</span>` : '';
+          const channelLine = linkedinOnly > 0
+            ? ` · ${emailReady} email-ready + ${linkedinOnly} LinkedIn-only`
+            : '';
+          const vettingParts = [];
+          if (rejectedCold > 0) vettingParts.push(`${rejectedCold} cold`);
+          if (rejectedIcp > 0) vettingParts.push(`${rejectedIcp} wrong-vertical`);
+          const vettingLine = vettingParts.length ? ` · <span style="color:#b86b0a">filtered ${vettingParts.join(', ')}</span>` : '';
           const pagesLine = r.search_pages > 1 ? ` over ${r.search_pages} pages` : '';
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${breakdownLine}${vettingLine}. <a href="#/leads">View leads →</a>`;
+
+          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned}${pagesLine} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${fitLine}${channelLine}${vettingLine}. <a href="#/leads">View leads →</a>`;
           load();
         } catch (e) {
           if (e.code === 'apollo_not_configured') {
@@ -906,7 +920,7 @@ function CampaignDetailView(id) {
       } }, 'Apollo Generate');
       genCard.append(
         el('h3', {}, 'Apollo lead generation'),
-        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Apollo.io database search + enrichment. Only HOT leads are kept — decision-maker seniority (manager+) with at least one buying signal (fresh role, org-size fit, or active employment). Leads with verified emails get an "email" badge and can be enrolled into sequences; leads with no verified email get a "linkedin-only" badge (reach them manually). Cost: 1 Apollo credit per enriched candidate (~$0.05).'),
+        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Apollo.io database search + enrichment + two-stage vetting. Apollo keyword-filters to mother/baby/family/FMCG companies at search; then classifyHotness filters to decision-makers with buying signals; then a one-shot Haiku pass classifies each candidate as strong fit / weak fit / reject against Nuren\'s real buyer profile. Only fit and weak-fit leads land in the table. Cost: 1 Apollo credit per enriched candidate (~$0.05) + ~$0.003 for the batch ICP classification.'),
         el('div', { style: 'display:flex; align-items:center; gap:10px; flex-wrap:wrap' },
           el('label', { style: 'font-size:13px' }, 'How many candidates (max 15): '),
           countInput,
@@ -970,9 +984,7 @@ function CampaignDetailView(id) {
       }
 
       function renderRow(l) {
-        // Heat badge. For HOT leads, also show outreach mode — email-ready
-        // leads can be enrolled into the email sequence; linkedin-only leads
-        // need manual outreach on LinkedIn.
+        // Heat badge. For HOT leads, also show outreach mode + ICP fit chip.
         const isHot = (l.lead_type || 'cold').toLowerCase() === 'hot';
         const heatBadge = el('span', {});
         if (isHot) {
@@ -980,6 +992,16 @@ function CampaignDetailView(id) {
           if (!l.email) {
             heatBadge.append(' ', el('span', { class: 'badge', style: 'background:#e5e0f4; color:#40309c' }, 'LinkedIn-only'));
           }
+          // ICP fit chip (from Apollo post-vet). Only surface strong fit as
+          // green; weak fit stays neutral; reject leads never reach this view.
+          try {
+            const enr = l.enrichment ? (typeof l.enrichment === 'string' ? JSON.parse(l.enrichment) : l.enrichment) : null;
+            if (enr?.icp_fit === 'fit') {
+              heatBadge.append(' ', el('span', { class: 'badge ok', title: enr.icp_reason || '' }, 'fit'));
+            } else if (enr?.icp_fit === 'weak') {
+              heatBadge.append(' ', el('span', { class: 'badge', title: enr.icp_reason || '' }, 'weak fit'));
+            }
+          } catch {}
         } else {
           heatBadge.append(el('span', { class: 'badge' }, 'cold'));
         }

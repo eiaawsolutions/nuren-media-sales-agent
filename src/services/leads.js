@@ -122,7 +122,7 @@ export function listLeads(userId, { status, persona, lead_type, search, limit = 
   }
   const sql = `
     SELECT l.id, l.name, l.email, l.title, l.persona, l.type, l.lead_type, l.confidence_score, l.score,
-           l.status, l.source, l.linkedin_url, l.company_website, l.buying_signal, l.created_at,
+           l.status, l.source, l.linkedin_url, l.company_website, l.buying_signal, l.enrichment, l.created_at,
            a.name AS account_name, a.industry AS account_industry
     FROM leads l LEFT JOIN accounts a ON a.id = l.account_id
     WHERE ${where.join(' AND ')}
