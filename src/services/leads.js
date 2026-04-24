@@ -2,12 +2,97 @@ import db from '../db/index.js';
 import { verifyLead } from './lead-verification.js';
 
 /**
+ * Extract the canonical LinkedIn handle from a profile URL for dedup.
+ * linkedin.com/in/FirdausH/  →  firdaush
+ * www.linkedin.com/in/foo-bar?ref=x  →  foo-bar
+ * Returns '' if the URL is not a /in/ profile.
+ */
+function linkedinHandle(url) {
+  if (!url || typeof url !== 'string') return '';
+  const m = url.match(/linkedin\.com\/in\/([^/?#\s]+)/i);
+  return m ? m[1].toLowerCase().replace(/\/$/, '') : '';
+}
+
+/** Normalise a string into a slug for name/company fingerprints. */
+function slug(s) {
+  return (s || '').toLowerCase().normalize('NFKD').replace(/[^\w]+/g, '').trim();
+}
+
+/**
+ * Look up an existing lead by a layered dedup key. Returns the existing row
+ * or null. Order of precedence (first match wins):
+ *   1. Apollo ID (when source=apollo and enrichment has apollo_id)
+ *   2. LinkedIn handle (canonical, case-insensitive)
+ *   3. Email (exact, case-insensitive) — only when email is non-empty
+ *   4. Name + company fingerprint fallback
+ *
+ * This covers the three real-world dup cases observed on prod (2026-04-24):
+ *   - Same person, no email either time (email='' matches nothing)
+ *   - Same person enriched twice with different email variants
+ *   - Same person added manually and then again via Apollo
+ */
+function findExistingLead(userId, lead, source, raw) {
+  // 1. Apollo ID — most reliable when available
+  let apolloId = null;
+  try {
+    const enr = typeof lead.enrichment === 'object' ? lead.enrichment : (lead.enrichment ? JSON.parse(lead.enrichment) : null);
+    apolloId = enr?.apollo_id || null;
+  } catch {}
+  if (apolloId) {
+    const byApollo = db.prepare(`
+      SELECT id FROM leads
+      WHERE user_id = ? AND enrichment LIKE ?
+      LIMIT 1
+    `).get(userId, `%"apollo_id":"${apolloId}"%`);
+    if (byApollo) return byApollo;
+  }
+
+  // 2. LinkedIn handle
+  const handle = linkedinHandle(lead.linkedin_url);
+  if (handle) {
+    const byLinkedIn = db.prepare(`
+      SELECT id FROM leads
+      WHERE user_id = ?
+        AND linkedin_url LIKE ?
+      LIMIT 1
+    `).get(userId, `%/in/${handle}%`);
+    if (byLinkedIn) return byLinkedIn;
+  }
+
+  // 3. Email (only when non-empty)
+  if (lead.email) {
+    const byEmail = db.prepare('SELECT id FROM leads WHERE user_id = ? AND lower(email) = lower(?)').get(userId, lead.email);
+    if (byEmail) return byEmail;
+  }
+
+  // 4. Name + company fingerprint (last resort — catches manual CSV dups)
+  const nameKey = slug(lead.name);
+  const companyKey = slug(lead.company || raw?.company || '');
+  if (nameKey && companyKey) {
+    const byNameCompany = db.prepare(`
+      SELECT l.id FROM leads l LEFT JOIN accounts a ON a.id = l.account_id
+      WHERE l.user_id = ?
+        AND lower(replace(replace(l.name, ' ', ''), '-', '')) = ?
+        AND lower(replace(replace(COALESCE(a.name, ''), ' ', ''), '-', '')) LIKE ?
+      LIMIT 1
+    `).get(userId, nameKey, `%${companyKey}%`);
+    if (byNameCompany) return byNameCompany;
+  }
+
+  return null;
+}
+
+/**
  * Persist a verified lead. Runs the verification gate again defensively — the
  * same function used at enrichment time — so even manual CSV uploads cannot
  * sneak Low-confidence rows into the leads table.
  *
  * Auto-creates/links an `accounts` row when `company` is present.
- * Returns { ok, lead_id?, account_id?, reasons?, rejected_id? }.
+ * Dedup: layered key (apollo_id → linkedin_handle → email → name+company).
+ *   When a match is found, the existing row is UPDATED with the new data
+ *   and the return payload carries `updated: true`. Never inserts a dup.
+ *
+ * Returns { ok, lead_id?, account_id?, updated?, reasons?, rejected_id? }.
  */
 export function persistLead(raw, { userId, source = 'manual' }) {
   const { ok, reasons, lead } = verifyLead(raw);
@@ -43,25 +128,35 @@ export function persistLead(raw, { userId, source = 'manual' }) {
     }
   }
 
-  // Upsert by (user_id, email) when email present. If email is '', always insert (anonymous lead).
+  // Layered dedup — see findExistingLead() for the precedence. If a match is
+  // found we UPDATE that row with the new fields instead of inserting a dup.
   let lead_id;
-  const existingLead = lead.email ? db.prepare('SELECT id FROM leads WHERE user_id = ? AND email = ?').get(userId, lead.email) : null;
+  const existingLead = findExistingLead(userId, lead, source, raw);
 
   if (existingLead) {
+    // Upsert path. COALESCE preserves existing values when the new row has
+    // nothing to add — e.g. Apollo re-ingest with no email won't blank out
+    // an email that was captured manually earlier.
     db.prepare(`
       UPDATE leads SET
         account_id = COALESCE(?, account_id),
-        name = ?, title = ?, phone = ?, other_contact = ?,
+        name = COALESCE(NULLIF(?, ''), name),
+        title = COALESCE(NULLIF(?, ''), title),
+        email = COALESCE(NULLIF(?, ''), email),
+        phone = COALESCE(NULLIF(?, ''), phone),
+        other_contact = COALESCE(NULLIF(?, ''), other_contact),
         persona = ?, type = ?,
         lead_type = ?, confidence_score = ?,
-        linkedin_url = ?, company_website = ?,
+        linkedin_url = COALESCE(NULLIF(?, ''), linkedin_url),
+        company_website = COALESCE(NULLIF(?, ''), company_website),
         verification_sources = ?, reason_for_fit = ?, buying_signal = ?,
         enrichment = ?, source = ?,
         updated_at = datetime('now')
       WHERE id = ?
     `).run(
       account_id,
-      lead.name, lead.title || null, lead.phone || '', lead.other_contact || '',
+      lead.name || '', lead.title || '',
+      lead.email || '', lead.phone || '', lead.other_contact || '',
       (lead.persona || 'unknown'), (lead.type || 'B2B'),
       (lead.lead_type || 'cold'), (lead.confidence_score || 'medium'),
       lead.linkedin_url || '', lead.company_website || '',
