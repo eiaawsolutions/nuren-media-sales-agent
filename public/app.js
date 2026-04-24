@@ -559,6 +559,13 @@ function showGenerateLeadsError(e) {
     }
     return;
   }
+  if (e.code === 'apollo_plan_insufficient') {
+    const url = e.billingUrl || 'https://app.apollo.io/#/settings/plans';
+    if (confirm('Your Apollo plan does not include API access for lead search. The Basic tier and above unlock the People Search + Enrichment APIs.\n\nOpen Apollo plans page to upgrade?')) {
+      window.open(url, '_blank', 'noopener');
+    }
+    return;
+  }
   if (e.code === 'apollo_credits_depleted') {
     const url = e.billingUrl || 'https://app.apollo.io/#/settings/plans';
     if (confirm('Apollo credits are depleted or monthly quota hit.\n\nTop up or wait for reset?')) {

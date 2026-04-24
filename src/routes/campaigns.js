@@ -127,6 +127,7 @@ router.post('/:id/apollo-generate', async (req, res) => {
   } catch (err) {
     console.error('[campaigns/apollo-generate]', err.message);
     const status = err.code === 'apollo_not_configured' ? 503
+      : err.code === 'apollo_plan_insufficient' ? 402
       : err.code === 'apollo_credits_depleted' ? 402
       : err.code === 'apollo_auth_failed' ? 401
       : err.code === 'apollo_rate_limited' ? 429

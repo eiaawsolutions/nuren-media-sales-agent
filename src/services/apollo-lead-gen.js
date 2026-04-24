@@ -351,6 +351,15 @@ function rewriteApolloError(err) {
   const msg = err.message || '';
   const pay = JSON.stringify(err.payload || {}).toLowerCase();
 
+  // Apollo returns 403 with error_code=API_INACCESSIBLE when your plan doesn't
+  // include API access for the endpoint. Free plans block /mixed_people/api_search
+  // + /people/match. Distinct from a bad key (also 401/403 but with different body).
+  if (status === 403 && /api_inaccessible|not accessible|upgrade your plan|free plan/i.test(pay)) {
+    const e = new Error('Your Apollo plan does not include API access for lead search. Upgrade to a paid plan at https://app.apollo.io/#/settings/plans — Basic tier and above include the People Search + Enrichment APIs.');
+    e.code = 'apollo_plan_insufficient';
+    e.billingUrl = 'https://app.apollo.io/#/settings/plans';
+    return e;
+  }
   if (status === 401 || status === 403) {
     const e = new Error('Apollo API key is invalid or lacks permission for this endpoint. Generate a new key at https://app.apollo.io/#/settings/integrations/api and re-save in Settings.');
     e.code = 'apollo_auth_failed';
