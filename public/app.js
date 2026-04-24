@@ -485,29 +485,10 @@ function DraftsView() {
  * Ask how many leads, POST to generate-leads, alert the summary, then reload.
  * Shared by the row button in CampaignsView and any other place that needs it.
  */
-async function runGenerateLeads(campaignId, campaignName, onDone) {
-  const countStr = prompt(`How many leads should AI find for "${campaignName}"? (1–15)`, '5');
-  if (!countStr) return;
-  const count = Math.min(Math.max(parseInt(countStr, 10) || 5, 1), 15);
-  const busy = el('div', {
-    style: 'position:fixed; top:20px; right:20px; background:#2a1f5c; color:white; padding:12px 18px; border-radius:10px; font-size:13.5px; z-index:9999; box-shadow:0 8px 24px rgba(0,0,0,.15)'
-  }, `Searching the web for ${count} leads… this takes 30–90 seconds.`);
-  document.body.appendChild(busy);
-  try {
-    const r = await api('/campaigns/' + campaignId + '/generate-leads', { method: 'POST', body: JSON.stringify({ count }) });
-    alert(`AI generated ${r.generated} leads · rejected ${r.rejected} · ${r.web_search_uses} web searches used.\n\nOpen the Leads tab to see them.`);
-    if (onDone) onDone();
-  } catch (e) {
-    showGenerateLeadsError(e);
-  } finally {
-    busy.remove();
-  }
-}
-
 /**
- * Apollo-backed lead gen. Uses structured filters (title + seniority + industry +
- * geography + company size) — faster + higher email hit rate than AI Generate,
- * but less nuanced. Errors share the same handler as AI Generate.
+ * Apollo-backed lead gen (only source now that AI Generate has been retired).
+ * Uses structured filters (title + seniority + geography + company size) +
+ * server-side hot-lead vetting. 1 Apollo credit per enriched lead.
  */
 async function runApolloGenerate(campaignId, campaignName, onDone) {
   const countStr = prompt(`How many Apollo-verified leads for "${campaignName}"? (1–15)`, '5');
@@ -519,7 +500,8 @@ async function runApolloGenerate(campaignId, campaignName, onDone) {
   document.body.appendChild(busy);
   try {
     const r = await api('/campaigns/' + campaignId + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count }) });
-    alert(`Apollo returned ${r.total_returned} matches · persisted ${r.generated} · rejected ${r.rejected}.\n\nOpen the Leads tab to see them.`);
+    const coldLine = r.rejected_cold ? `\n${r.rejected_cold} filtered as cold (no buying signal or junior role).` : '';
+    alert(`Apollo searched ${r.total_returned} · enriched ${r.enrichment_calls}\nPersisted ${r.generated} HOT leads · rejected ${r.rejected} total.${coldLine}\n\nOpen the Leads tab to see them.`);
     if (onDone) onDone();
   } catch (e) {
     showGenerateLeadsError(e);
@@ -647,14 +629,10 @@ function CampaignsView() {
       )));
       const tbody = el('tbody');
       for (const c of rows) {
-        const genBtn = el('button', { class: 'btn', style: 'margin-right:6px', onclick: async (ev) => {
-          ev.preventDefault();
-          await runGenerateLeads(c.id, c.name, load);
-        } }, 'AI Generate');
-        const apolloBtn = el('button', { class: 'btn', style: 'margin-right:6px', title: 'Apollo.io — faster, verified emails', onclick: async (ev) => {
+        const apolloBtn = el('button', { class: 'btn primary', style: 'margin-right:6px', title: 'Apollo.io — verified emails, hot leads only', onclick: async (ev) => {
           ev.preventDefault();
           await runApolloGenerate(c.id, c.name, load);
-        } }, 'Apollo');
+        } }, 'Apollo Generate');
         tbody.append(el('tr', {},
           el('td', {}, el('a', { href: '#/campaign/' + c.id }, c.name)),
           el('td', {}, c.objective),
@@ -665,7 +643,7 @@ function CampaignsView() {
           el('td', {}, String(c.replied_count || 0)),
           el('td', {}, String(c.sent_count || 0)),
           el('td', {}, '$' + (c.ai_cost || 0).toFixed(4)),
-          el('td', {}, genBtn, apolloBtn, el('a', { href: '#/campaign/' + c.id, class: 'btn' }, 'Open')),
+          el('td', {}, apolloBtn, el('a', { href: '#/campaign/' + c.id, class: 'btn' }, 'Open')),
         ));
       }
       tbl.append(tbody);
@@ -705,34 +683,16 @@ function CampaignDetailView(id) {
       genCard.innerHTML = '';
       const countInput = el('input', { type: 'number', min: '1', max: '15', value: '5', style: 'width:70px' });
       const genStatus = el('span', { class: 'sub', style: 'margin-left:10px; font-size:13px' });
-      const genBtn = el('button', { class: 'btn primary', onclick: async () => {
-        const n = Math.min(Math.max(parseInt(countInput.value, 10) || 5, 1), 15);
-        genBtn.disabled = true;
-        genStatus.textContent = `Searching the web for ${n} leads — this takes ~30–90 seconds…`;
-        try {
-          const r = await api('/campaigns/' + id + '/generate-leads', { method: 'POST', body: JSON.stringify({ count: n }) });
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ Generated <b>${r.generated}</b></span> · rejected ${r.rejected} · ${r.web_search_uses} web searches. <a href="#/leads">View leads →</a>`;
-          load();
-        } catch (e) {
-          if (e.code === 'anthropic_credits_depleted') {
-            const url = e.billingUrl || 'https://console.anthropic.com/settings/billing';
-            genStatus.innerHTML = `<span style="color:#a12525">Anthropic credits depleted — no charge incurred. <a href="${url}" target="_blank" rel="noopener">Top up on console.anthropic.com →</a></span>`;
-          } else {
-            showGenerateLeadsError(e);
-            genStatus.innerHTML = `<span style="color:#a12525">Failed: ${e.message}</span>`;
-          }
-        } finally {
-          genBtn.disabled = false;
-        }
-      } }, 'AI Generate (web_search)');
-      const apolloBtn = el('button', { class: 'btn', onclick: async () => {
+      const apolloBtn = el('button', { class: 'btn primary', onclick: async () => {
         const n = Math.min(Math.max(parseInt(countInput.value, 10) || 5, 1), 15);
         apolloBtn.disabled = true;
-        genBtn.disabled = true;
-        genStatus.textContent = `Apollo searching ${n} leads — ~2–5 seconds…`;
+        const method = n === 1 ? 'single-enrich' : 'bulk-enrich';
+        genStatus.textContent = `Apollo: searching ${n} candidates → ${method} → hot-lead vetting…`;
         try {
           const r = await api('/campaigns/' + id + '/apollo-generate', { method: 'POST', body: JSON.stringify({ count: n }) });
-          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ Apollo found ${r.total_returned}, enriched ${r.enrichment_calls}, persisted <b>${r.generated}</b></span> · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
+          const rejectedCold = r.rejected_cold || 0;
+          const vettingLine = rejectedCold > 0 ? ` · <span style="color:#b86b0a">${rejectedCold} filtered as cold</span>` : '';
+          genStatus.innerHTML = `<span style="color:#1b7a3a">✓ searched ${r.total_returned} · enriched ${r.enrichment_calls} · persisted <b>${r.generated} HOT</b></span>${vettingLine} · rejected ${r.rejected}. <a href="#/leads">View leads →</a>`;
           load();
         } catch (e) {
           if (e.code === 'apollo_not_configured') {
@@ -745,16 +705,14 @@ function CampaignDetailView(id) {
           }
         } finally {
           apolloBtn.disabled = false;
-          genBtn.disabled = false;
         }
       } }, 'Apollo Generate');
       genCard.append(
-        el('h3', {}, 'Lead generation'),
-        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Two sources for the same ICP. AI Generate: Claude web_search finds nuanced matches (30–90s, ~$0.60/click). Apollo: filter-based database search with verified emails (2–5s, uses Apollo credits). Both run the same server-side verification gate.'),
+        el('h3', {}, 'Apollo lead generation'),
+        el('p', { class: 'sub', style: 'margin:0 0 10px' }, 'Apollo.io database search + enrichment. Only HOT leads are kept — verified email, decision-maker seniority (manager+), and at least one buying signal (fresh role, org-size fit, or active employment). Cold leads are filtered out. Cost: 1 Apollo credit per enriched lead (~$0.05).'),
         el('div', { style: 'display:flex; align-items:center; gap:10px; flex-wrap:wrap' },
-          el('label', { style: 'font-size:13px' }, 'How many leads (max 15): '),
+          el('label', { style: 'font-size:13px' }, 'How many candidates (max 15): '),
           countInput,
-          genBtn,
           apolloBtn,
           genStatus,
         ),

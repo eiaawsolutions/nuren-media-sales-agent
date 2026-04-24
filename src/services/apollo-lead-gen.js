@@ -56,7 +56,8 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   };
 
   // Step 1 — zero-credit structured search. Returns candidate records with
-  // id/name/title/company/linkedin_url but NO email or phone.
+  // id/name/title/company (obfuscated last_name, no email/phone/linkedin).
+  console.log(`[apollo-lead-gen] START campaignId=${campaignId} requested=${numLeads} filters=${JSON.stringify(filters)}`);
   let searchResponse;
   try {
     searchResponse = await apolloFetch('/mixed_people/api_search', apiKey, searchBody);
@@ -65,42 +66,47 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
   }
 
   const candidates = Array.isArray(searchResponse?.people) ? searchResponse.people : [];
+  console.log(`[apollo-lead-gen] search returned ${candidates.length} candidates (total_entries=${searchResponse?.total_entries})`);
 
-  // Step 2 — enrichment per candidate. Each call burns Apollo credits to reveal
-  // the email + phone. We do this sequentially rather than in parallel so one
-  // 429 doesn't cascade and so operators can watch the credit burn visibly.
+  if (candidates.length === 0) {
+    return { generated: 0, rejected: 0, rejected_cold: 0, source: 'apollo', requested: numLeads, total_returned: 0, enrichment_calls: 0, leads: [], rejections: [] };
+  }
+
+  // Step 2 — enrichment. Single-enrich (/people/match) for count=1, bulk-enrich
+  // (/people/bulk_match) for count>1. Bulk is 1 API call regardless of batch
+  // size, halving latency vs sequential single-enrich; credit cost is identical.
   const enrichedPeople = [];
   let enrichmentCalls = 0;
-  for (const candidate of candidates) {
+  if (candidates.length === 1) {
     try {
-      // reveal_phone_number requires a webhook_url (Apollo delivers phones async);
-      // we keep the flow synchronous by revealing emails only. Phones come back
-      // when the organization has direct dials published, not via reveal.
-      const enriched = await apolloFetch('/people/match', apiKey, {
-        id: candidate.id,
+      const resp = await apolloFetch('/people/match', apiKey, {
+        id: candidates[0].id,
         reveal_personal_emails: true,
       });
-      enrichmentCalls++;
-      // The enrichment response nests the person under `person`; fall back to
-      // top-level if the API shape changes.
-      enrichedPeople.push(enriched?.person || enriched);
+      enrichmentCalls = 1;
+      enrichedPeople.push(resp?.person || resp);
+      console.log('[apollo-lead-gen] single-enrich complete');
     } catch (err) {
-      // If we hit a rate limit or credit block mid-batch, stop enrichment and
-      // surface what we've got. Keep unenriched candidates as "no email" leads
-      // so the verification gate can still accept LinkedIn-only records.
-      const rewritten = rewriteApolloError(err);
-      if (rewritten.code === 'apollo_credits_depleted' || rewritten.code === 'apollo_rate_limited') {
-        console.warn(`[apollo-lead-gen] enrichment halted at ${enrichmentCalls}/${candidates.length}: ${rewritten.message}`);
-        // Push the raw candidate so we keep the LinkedIn-only lead.
-        enrichedPeople.push(candidate);
-        break;
-      }
-      // Other errors — push raw candidate, continue.
-      console.warn(`[apollo-lead-gen] enrichment failed for ${candidate.id}: ${err.message}`);
-      enrichedPeople.push(candidate);
+      throw rewriteApolloError(err);
+    }
+  } else {
+    try {
+      const resp = await apolloFetch('/people/bulk_match', apiKey, {
+        reveal_personal_emails: true,
+        details: candidates.map(c => ({ id: c.id })),
+      });
+      enrichmentCalls = 1; // 1 API call for N enrichments (billed per-person server-side)
+      const matches = Array.isArray(resp?.matches) ? resp.matches : [];
+      enrichedPeople.push(...matches);
+      console.log(`[apollo-lead-gen] bulk-enrich complete: ${matches.length}/${candidates.length} matched`);
+    } catch (err) {
+      throw rewriteApolloError(err);
     }
   }
 
+  // Apollo bills credits per-person-enriched, not per-API-call. So cost scales
+  // with enrichedPeople.length even when we made a single bulk_match call.
+  const creditsConsumed = enrichedPeople.length;
   logAICost({
     userId,
     campaignId,
@@ -109,13 +115,12 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
     inputTokens: 0,
     outputTokens: 0,
     webSearchRequests: 0,
-    // Cost driver is enrichment calls, not search results. One /people/match
-    // call per candidate we kept, each at ~1 Apollo credit ≈ APOLLO_CREDIT_COST_USD.
-    costOverride: enrichmentCalls * APOLLO_CREDIT_COST_USD,
+    costOverride: creditsConsumed * APOLLO_CREDIT_COST_USD,
   });
 
   const accepted = [];
   const rejected = [];
+  let rejectedCold = 0;
   const seenInBatch = new Set();
   const existingEmails = db.prepare("SELECT email FROM leads WHERE user_id = ? AND email != ''").all(userId).map(r => r.email.toLowerCase());
 
@@ -128,6 +133,25 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       if (existingEmails.includes(emailKey)) { rejected.push({ name: candidate.name, reasons: ['duplicate_with_existing'] }); continue; }
       seenInBatch.add(emailKey);
     }
+
+    // Hot-lead vetting (only-hot policy set 2026-04-24). Lead must:
+    //   1. Have a verified email (Apollo email_status === 'verified')
+    //   2. Be at decision-maker seniority (manager, director, head, vp, c_suite, founder, owner)
+    //   3. Fire at least one buying signal (fresh role OR org-size-fit)
+    // Cold leads are not persisted. Rejection reasons are logged to
+    // leads_rejected for audit, but the count surfaces separately as
+    // rejected_cold so the UI can explain the vetting.
+    const hotVerdict = classifyHotness(person);
+    if (!hotVerdict.hot) {
+      rejectedCold++;
+      db.prepare("INSERT INTO leads_rejected (user_id, raw_input, reasons, source) VALUES (?,?,?,?)")
+        .run(userId, JSON.stringify(person), JSON.stringify(['cold:' + hotVerdict.reason]), 'apollo');
+      rejected.push({ name: candidate.name, reasons: ['cold:' + hotVerdict.reason] });
+      continue;
+    }
+    // Override lead_type + buying_signal with what the vetter found.
+    candidate.lead_type = 'hot';
+    candidate.buying_signal = hotVerdict.signal;
 
     const gate = verifyLead(candidate);
     if (!gate.ok) {
@@ -153,19 +177,84 @@ export async function generateLeadsViaApollo({ userId, campaignId, count = 5 }) 
       company: gate.lead.company,
       lead_type: gate.lead.lead_type,
       confidence_score: gate.lead.confidence_score,
+      buying_signal: gate.lead.buying_signal,
     });
   }
+
+  console.log(`[apollo-lead-gen] DONE persisted=${accepted.length} rejected_total=${rejected.length} rejected_cold=${rejectedCold} credits=${creditsConsumed}`);
 
   return {
     generated: accepted.length,
     rejected: rejected.length,
+    rejected_cold: rejectedCold,
     source: 'apollo',
     requested: numLeads,
     total_returned: candidates.length,
     enrichment_calls: enrichmentCalls,
+    credits_consumed: creditsConsumed,
     leads: accepted,
     rejections: rejected,
   };
+}
+
+/**
+ * Hot-lead classifier. A lead qualifies as HOT for Nuren when:
+ *   - Email is Apollo-verified (email_status === 'verified')
+ *   - Seniority is decision-maker tier (not entry/intern/individual contributor)
+ *   - At least one buying signal fires:
+ *       A. Started in current role within the last 90 days (fresh mandate)
+ *       B. Organization size 10-500 employees (Nuren's sweet spot)
+ *       C. Current employment is active (has no end_date on current role)
+ *
+ * Returns { hot: boolean, signal: string | null, reason: string | null }.
+ * `signal` becomes the buying_signal on accepted leads. `reason` becomes the
+ * rejection tag on discarded cold leads.
+ */
+const HOT_SENIORITIES = new Set(['manager', 'director', 'head', 'vp', 'c_suite', 'founder', 'owner', 'partner']);
+
+function classifyHotness(person) {
+  // Hygiene prerequisite — no verified email means can't do cold outreach anyway
+  if ((person.email_status || '').toLowerCase() !== 'verified') {
+    return { hot: false, reason: 'no_verified_email' };
+  }
+
+  // Seniority gate
+  const seniority = (person.seniority || '').toLowerCase();
+  if (seniority && !HOT_SENIORITIES.has(seniority)) {
+    return { hot: false, reason: `seniority_too_junior:${seniority}` };
+  }
+
+  // Try to fire at least one buying signal
+  const signals = [];
+
+  // Signal A — fresh role start
+  const history = Array.isArray(person.employment_history) ? person.employment_history : [];
+  const currentRole = history.find(h => h.current) || history[0];
+  if (currentRole?.start_date) {
+    const days = (Date.now() - new Date(currentRole.start_date).getTime()) / 86400000;
+    if (days >= 0 && days <= 90) signals.push(`fresh_mandate:${Math.round(days)}d_in_role`);
+  }
+
+  // Signal B — org size sweet spot
+  const empCount = person.organization?.estimated_num_employees;
+  if (typeof empCount === 'number' && empCount >= 10 && empCount <= 500) {
+    signals.push(`org_size_fit:${empCount}_employees`);
+  }
+
+  // Signal C — active current role (has no end_date on current employment)
+  if (currentRole?.current && !currentRole.end_date) {
+    signals.push('active_role');
+  }
+
+  if (signals.length === 0) {
+    return { hot: false, reason: 'no_buying_signals' };
+  }
+
+  // Prefer fresh mandate > org size fit > active role for the buying_signal string
+  const best = signals.find(s => s.startsWith('fresh_mandate'))
+            || signals.find(s => s.startsWith('org_size_fit'))
+            || signals[0];
+  return { hot: true, signal: best, reason: null };
 }
 
 function getApolloKey() {
@@ -273,19 +362,11 @@ function apolloPersonToLead(person, campaign) {
   const geoBits = [person.city, person.state, person.country].filter(Boolean);
   const geography = geoBits.join(', ');
 
-  // Buying signal — Apollo sometimes returns `employment_history[0].start_date`;
-  // if it's within the last 90 days, flag as "recent job change" signal.
-  let buyingSignal = '';
-  let leadType = 'cold';
-  const recentStart = person.employment_history?.[0]?.start_date;
-  if (recentStart) {
-    const started = new Date(recentStart);
-    const days = (Date.now() - started.getTime()) / (86400 * 1000);
-    if (days >= 0 && days <= 90) {
-      buyingSignal = `Started in current role ${Math.round(days)} days ago — fresh mandate to prove impact`;
-      leadType = 'hot';
-    }
-  }
+  // lead_type and buying_signal are owned by classifyHotness() in the main flow;
+  // we default to cold here and let the classifier override both fields on
+  // accepted hot leads. This keeps a single source of truth for hotness rules.
+  const buyingSignal = '';
+  const leadType = 'cold';
 
   return {
     name,
