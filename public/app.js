@@ -65,6 +65,32 @@ async function apiUpload(path, formData) {
   return data;
 }
 
+function renderHeatCell(l) {
+  // Mirrors the campaign-detail enroll-table Heat column:
+  //   HOT badge + LinkedIn-only chip (when email is missing)
+  //   + fit / weak-fit chip from Apollo ICP post-vet (enrichment.icp_fit).
+  // Cold leads get a plain "cold" badge.
+  const isHot = (l.lead_type || 'cold').toLowerCase() === 'hot';
+  const span = el('span', {});
+  if (isHot) {
+    span.append(el('span', { class: 'badge warn' }, 'HOT'));
+    if (!l.email) {
+      span.append(' ', el('span', { class: 'badge', style: 'background:#e5e0f4; color:#40309c' }, 'LinkedIn-only'));
+    }
+    try {
+      const enr = l.enrichment ? (typeof l.enrichment === 'string' ? JSON.parse(l.enrichment) : l.enrichment) : null;
+      if (enr?.icp_fit === 'fit') {
+        span.append(' ', el('span', { class: 'badge ok', title: enr.icp_reason || '' }, 'fit'));
+      } else if (enr?.icp_fit === 'weak') {
+        span.append(' ', el('span', { class: 'badge', title: enr.icp_reason || '' }, 'weak fit'));
+      }
+    } catch {}
+  } else {
+    span.append(el('span', { class: 'badge' }, 'cold'));
+  }
+  return span;
+}
+
 function unenrichedBanner(count, label) {
   return el('div', { class: 'unenriched-banner' },
     el('span', { class: 'unenriched-icon' }, '⚠'),
@@ -453,7 +479,7 @@ function LeadsView() {
           el('td', {}, el('a', { href: '#/lead/' + l.id }, l.name)),
           el('td', {}, l.account_name || '—'),
           el('td', {}, (l.persona || '').replace(/_/g, ' ')),
-          el('td', {}, el('span', { class: 'badge ' + (l.lead_type === 'hot' ? 'warn' : '') }, l.lead_type || '')),
+          el('td', {}, renderHeatCell(l)),
           el('td', {}, l.confidence_score || ''),
           el('td', {}, String(l.score)),
           el('td', {}, l.email || '—'),
@@ -996,27 +1022,7 @@ function CampaignDetailView(id) {
       }
 
       function renderRow(l) {
-        // Heat badge. For HOT leads, also show outreach mode + ICP fit chip.
-        const isHot = (l.lead_type || 'cold').toLowerCase() === 'hot';
-        const heatBadge = el('span', {});
-        if (isHot) {
-          heatBadge.append(el('span', { class: 'badge warn' }, 'HOT'));
-          if (!l.email) {
-            heatBadge.append(' ', el('span', { class: 'badge', style: 'background:#e5e0f4; color:#40309c' }, 'LinkedIn-only'));
-          }
-          // ICP fit chip (from Apollo post-vet). Only surface strong fit as
-          // green; weak fit stays neutral; reject leads never reach this view.
-          try {
-            const enr = l.enrichment ? (typeof l.enrichment === 'string' ? JSON.parse(l.enrichment) : l.enrichment) : null;
-            if (enr?.icp_fit === 'fit') {
-              heatBadge.append(' ', el('span', { class: 'badge ok', title: enr.icp_reason || '' }, 'fit'));
-            } else if (enr?.icp_fit === 'weak') {
-              heatBadge.append(' ', el('span', { class: 'badge', title: enr.icp_reason || '' }, 'weak fit'));
-            }
-          } catch {}
-        } else {
-          heatBadge.append(el('span', { class: 'badge' }, 'cold'));
-        }
+        const heatBadge = renderHeatCell(l);
         const emailCell = l.email
           ? el('td', { class: 'col-email' }, l.email)
           : el('td', { class: 'col-email' }, el('span', { class: 'muted-cell' }, 'no email'));
