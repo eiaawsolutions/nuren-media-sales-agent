@@ -470,8 +470,8 @@ function LeadsView() {
       const tbl = el('table');
       tbl.append(el('thead', {}, el('tr', {},
         el('th', {}, 'Name'), el('th', {}, 'Company'), el('th', {}, 'Persona'),
-        el('th', {}, 'Heat'), el('th', {}, 'Confidence'), el('th', {}, 'Score'),
-        el('th', {}, 'Email'), el('th', {}, 'Status'), el('th', {}, ''),
+        el('th', {}, 'Confidence'), el('th', {}, 'Score'),
+        el('th', {}, 'Email'), el('th', {}, 'Heat'), el('th', {}, 'Status'), el('th', {}, ''),
       )));
       const tbody = el('tbody');
       for (const l of leads) {
@@ -479,10 +479,10 @@ function LeadsView() {
           el('td', {}, el('a', { href: '#/lead/' + l.id }, l.name)),
           el('td', {}, l.account_name || '—'),
           el('td', {}, (l.persona || '').replace(/_/g, ' ')),
-          el('td', {}, renderHeatCell(l)),
           el('td', {}, l.confidence_score || ''),
           el('td', {}, String(l.score)),
           el('td', {}, l.email || '—'),
+          el('td', {}, renderHeatCell(l)),
           el('td', {}, el('span', { class: 'badge' }, l.status)),
           el('td', {}, el('a', { href: '#/lead/' + l.id, class: 'btn' }, 'Open')),
         ));
