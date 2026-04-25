@@ -3,6 +3,7 @@ import db from '../db/index.js';
 import { ensureDefaultSequence, listSequences, enrollLeads } from '../services/sequences.js';
 import { generateLeadsForCampaign } from '../services/ai-lead-gen.js';
 import { generateLeadsViaApollo } from '../services/apollo-lead-gen.js';
+import { enrichedFragment, unenrichedFragment } from '../services/leads.js';
 
 const router = Router();
 
@@ -32,12 +33,26 @@ router.post('/', (req, res) => {
 router.get('/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM campaigns WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!c) return res.status(404).json({ error: 'not found' });
+  // Hide enrollments for unenriched leads by default (no reachable contact —
+  // these came from the legacy AI Web Search path or slipped past the gate
+  // and are dead rows in the campaign UI). Pass require_contact=0 to surface.
+  const requireContact = !(req.query.require_contact === '0' || req.query.require_contact === 0 || req.query.require_contact === 'false');
+  const contactClause = requireContact ? `AND ${enrichedFragment('l')}` : '';
   c.enrollments = db.prepare(`
     SELECT se.*, l.name AS lead_name, l.email AS lead_email, l.persona, l.lead_type
     FROM sequence_enrollments se JOIN leads l ON l.id = se.lead_id
-    WHERE se.campaign_id = ?
+    WHERE se.campaign_id = ? ${contactClause}
     ORDER BY se.created_at DESC
   `).all(c.id);
+  // Tell the UI how many were hidden so we can surface a banner + Settings link.
+  if (requireContact) {
+    c.hidden_unenriched = db.prepare(`
+      SELECT COUNT(*) AS c FROM sequence_enrollments se JOIN leads l ON l.id = se.lead_id
+      WHERE se.campaign_id = ? AND ${unenrichedFragment('l')}
+    `).get(c.id).c;
+  } else {
+    c.hidden_unenriched = 0;
+  }
   res.json(c);
 });
 

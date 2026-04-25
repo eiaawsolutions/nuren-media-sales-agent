@@ -90,6 +90,16 @@ input[type=text], input[type=email], input[type=password], input[type=url], sele
 .muted-cell { color:#9a8c6e; font-style:italic; font-size:12px; }
 .signal-pill { display:inline-block; padding:2px 8px; font-size:11px; border-radius:6px; background:#fdecd1; color:#8c5b0e; font-weight:500; white-space:nowrap; }
 
+/* --- unenriched banner (leads / pipeline / campaign-detail) --- */
+.unenriched-banner {
+  background:#fdf3e7; border:1px solid #f1d9b6; color:#8c5b0e;
+  padding:10px 14px; border-radius:10px; font-size:13px; line-height:1.5;
+  margin:0 0 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+.unenriched-banner .unenriched-icon { font-size:16px; }
+.unenriched-banner a { color:#8c5b0e; font-weight:600; text-decoration:underline; }
+.unenriched-banner a:hover { color:#5a3a08; }
+
 /* --- database cleanup card (settings) --- */
 .cleanup-card { border-left:4px solid #b91c1c; margin-top:24px; }
 .cleanup-card h3 { color:#b91c1c; }

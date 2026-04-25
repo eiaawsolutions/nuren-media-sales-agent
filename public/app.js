@@ -65,6 +65,14 @@ async function apiUpload(path, formData) {
   return data;
 }
 
+function unenrichedBanner(count, label) {
+  return el('div', { class: 'unenriched-banner' },
+    el('span', { class: 'unenriched-icon' }, '⚠'),
+    el('span', {}, `${count} unenriched ${label} hidden — no reachable email, phone, or LinkedIn /in/ profile. `),
+    el('a', { href: '#/settings' }, 'Purge from Settings → Database Cleanup →'),
+  );
+}
+
 function render() {
   const root = document.getElementById('root');
   root.innerHTML = '';
@@ -426,9 +434,13 @@ function LeadsView() {
       if (statusSel.value) params.set('status', statusSel.value);
       if (heatSel.value) params.set('lead_type', heatSel.value);
       if (search.value) params.set('search', search.value);
-      const leads = await api('/leads?' + params.toString());
+      const [leads, hidden] = await Promise.all([
+        api('/leads?' + params.toString()),
+        api('/leads/_/hidden-count').catch(() => ({ count: 0 })),
+      ]);
       listWrap.innerHTML = '';
-      if (!leads.length) return listWrap.append(el('p', { class: 'sub' }, 'No leads yet. Upload a CSV above.'));
+      if (hidden.count > 0) listWrap.append(unenrichedBanner(hidden.count, 'leads'));
+      if (!leads.length) return listWrap.append(el('p', { class: 'sub' }, 'No leads match. Upload a CSV above, or check Settings → Database Cleanup if you expected more.'));
       const tbl = el('table');
       tbl.append(el('thead', {}, el('tr', {},
         el('th', {}, 'Name'), el('th', {}, 'Company'), el('th', {}, 'Persona'),
@@ -1090,6 +1102,7 @@ function CampaignDetailView(id) {
 
       enrollList.innerHTML = '';
       enrollList.append(el('h3', {}, `Enrollments (${c.enrollments.length})`));
+      if (c.hidden_unenriched > 0) enrollList.append(unenrichedBanner(c.hidden_unenriched, 'enrollments'));
       if (!c.enrollments.length) {
         enrollList.append(el('p', { class: 'sub' }, 'No enrollments yet.'));
       } else {
@@ -1125,6 +1138,8 @@ function PipelineView() {
   wrap.append(el('h1', {}, 'Pipeline'));
   wrap.append(el('p', { class: 'sub' }, '6 stages: Prospect → Contacted → Engaged → Qualified → Proposal Sent → Closed (Won/Lost). Drag a card to advance. AI advances Contacted/Engaged automatically.'));
 
+  const bannerSlot = el('div');
+  wrap.append(bannerSlot);
   const board = el('div', { style: 'display:grid; grid-template-columns:repeat(7,1fr); gap:10px; align-items:start' });
   wrap.append(board);
 
@@ -1132,9 +1147,11 @@ function PipelineView() {
 
   async function load() {
     board.innerHTML = 'Loading…';
+    bannerSlot.innerHTML = '';
     try {
       const data = await api('/pipeline');
       board.innerHTML = '';
+      if (data.hidden_unenriched > 0) bannerSlot.append(unenrichedBanner(data.hidden_unenriched, 'pipeline rows'));
       for (const stage of data.stages) {
         const col = el('div', { class: 'card', style: 'min-height:200px; padding:10px' });
         const totalRow = data.totals.find(t => t.stage === stage);

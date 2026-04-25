@@ -12,19 +12,35 @@ import { verifyLead } from './lead-verification.js';
  * because they came from the legacy AI Web Search path before strict mode and
  * are unreachable. Same for the literal string 'unknown'.
  */
-export const UNENRICHED_WHERE_FRAGMENT = `
-  (email IS NULL OR email = '' OR email LIKE '%@noemail.%' OR email LIKE '%@example.%' OR lower(email) = 'unknown')
-  AND (phone IS NULL OR phone = '')
-  AND (linkedin_url IS NULL OR linkedin_url = '' OR linkedin_url NOT LIKE '%linkedin.com/in/%')
-`;
+export const UNENRICHED_WHERE_FRAGMENT = unenrichedFragment('');
+const ENRICHED_WHERE_FRAGMENT = enrichedFragment('l');
 
-const ENRICHED_WHERE_FRAGMENT = `
-  (
-    (l.email IS NOT NULL AND l.email != '' AND l.email NOT LIKE '%@noemail.%' AND l.email NOT LIKE '%@example.%' AND lower(l.email) != 'unknown')
-    OR (l.phone IS NOT NULL AND l.phone != '')
-    OR (l.linkedin_url IS NOT NULL AND l.linkedin_url LIKE '%linkedin.com/in/%')
-  )
-`;
+/**
+ * Build the "unenriched" SQL predicate against an arbitrary table alias.
+ * Pass '' for unaliased columns, or 'l' / 'leads' / etc. for joined queries.
+ */
+export function unenrichedFragment(alias = '') {
+  const p = alias ? `${alias}.` : '';
+  return `
+    (${p}email IS NULL OR ${p}email = '' OR ${p}email LIKE '%@noemail.%' OR ${p}email LIKE '%@example.%' OR lower(${p}email) = 'unknown')
+    AND (${p}phone IS NULL OR ${p}phone = '')
+    AND (${p}linkedin_url IS NULL OR ${p}linkedin_url = '' OR ${p}linkedin_url NOT LIKE '%linkedin.com/in/%')
+  `;
+}
+
+/**
+ * Inverse predicate — lead HAS at least one reachable channel.
+ */
+export function enrichedFragment(alias = '') {
+  const p = alias ? `${alias}.` : '';
+  return `
+    (
+      (${p}email IS NOT NULL AND ${p}email != '' AND ${p}email NOT LIKE '%@noemail.%' AND ${p}email NOT LIKE '%@example.%' AND lower(${p}email) != 'unknown')
+      OR (${p}phone IS NOT NULL AND ${p}phone != '')
+      OR (${p}linkedin_url IS NOT NULL AND ${p}linkedin_url LIKE '%linkedin.com/in/%')
+    )
+  `;
+}
 
 /**
  * Extract the canonical LinkedIn handle from a profile URL for dedup.

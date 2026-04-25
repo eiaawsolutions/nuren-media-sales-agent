@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import db from '../db/index.js';
 import { parseCsv } from '../utils/csv.js';
-import { persistLead, getLead, listLeads } from '../services/leads.js';
+import { persistLead, getLead, listLeads, unenrichedFragment } from '../services/leads.js';
 import { enrichLead } from '../services/lead-enrichment.js';
 
 const router = Router();
@@ -10,6 +10,14 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 
 router.get('/', (req, res) => {
   res.json(listLeads(req.user.id, req.query));
+});
+
+/** GET /api/leads/_/hidden-count — how many leads are hidden by the enrichment guard */
+router.get('/_/hidden-count', (req, res) => {
+  const { count } = db.prepare(
+    `SELECT COUNT(*) AS count FROM leads WHERE user_id = ? AND ${unenrichedFragment('')}`
+  ).get(req.user.id);
+  res.json({ count });
 });
 
 router.get('/rejected', (req, res) => {

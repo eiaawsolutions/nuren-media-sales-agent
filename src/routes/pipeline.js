@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import db from '../db/index.js';
+import { enrichedFragment, unenrichedFragment } from '../services/leads.js';
 
 const router = Router();
 
 const STAGES = ['prospect', 'contacted', 'engaged', 'qualified', 'proposal_sent', 'closed_won', 'closed_lost'];
 
 router.get('/', (req, res) => {
+  // Default ON: hide pipeline rows whose lead has no reachable contact.
+  const requireContact = !(req.query.require_contact === '0' || req.query.require_contact === 0 || req.query.require_contact === 'false');
+  const contactClause = requireContact ? `AND ${enrichedFragment('l')}` : '';
   const rows = db.prepare(`
     SELECT p.id, p.stage, p.deal_value_myr, p.probability, p.expected_close_date, p.notes,
            p.created_at, p.updated_at,
@@ -14,11 +18,10 @@ router.get('/', (req, res) => {
     FROM pipeline p
     JOIN leads l ON l.id = p.lead_id
     LEFT JOIN accounts a ON a.id = p.account_id
-    WHERE p.user_id = ?
+    WHERE p.user_id = ? ${contactClause}
     ORDER BY p.updated_at DESC
   `).all(req.user.id);
 
-  // Group into kanban columns
   const byStage = Object.fromEntries(STAGES.map(s => [s, []]));
   for (const r of rows) byStage[r.stage] = byStage[r.stage] || [], byStage[r.stage].push(r);
 
@@ -27,7 +30,13 @@ router.get('/', (req, res) => {
     count: byStage[s]?.length || 0,
     value: (byStage[s] || []).reduce((a, b) => a + (b.deal_value_myr || 0), 0),
   }));
-  res.json({ stages: STAGES, byStage, totals });
+  const hidden_unenriched = requireContact
+    ? db.prepare(`
+        SELECT COUNT(*) AS c FROM pipeline p JOIN leads l ON l.id = p.lead_id
+        WHERE p.user_id = ? AND ${unenrichedFragment('l')}
+      `).get(req.user.id).c
+    : 0;
+  res.json({ stages: STAGES, byStage, totals, hidden_unenriched });
 });
 
 router.post('/', (req, res) => {
