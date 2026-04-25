@@ -90,6 +90,18 @@ input[type=text], input[type=email], input[type=password], input[type=url], sele
 .muted-cell { color:#9a8c6e; font-style:italic; font-size:12px; }
 .signal-pill { display:inline-block; padding:2px 8px; font-size:11px; border-radius:6px; background:#fdecd1; color:#8c5b0e; font-weight:500; white-space:nowrap; }
 
+/* --- database cleanup card (settings) --- */
+.cleanup-card { border-left:4px solid #b91c1c; margin-top:24px; }
+.cleanup-card h3 { color:#b91c1c; }
+.cleanup-card .cleanup-desc { font-size:13px; color:var(--ink-2); margin:4px 0 14px; line-height:1.55; }
+.cleanup-card .cleanup-actions { display:flex; gap:10px; flex-wrap:wrap; }
+.cleanup-card .btn.danger.primary { background:#b91c1c; color:#fff; border-color:#b91c1c; }
+.cleanup-card .btn.danger.primary:hover { background:#a11818; }
+.cleanup-status { margin-top:12px; font-size:13px; min-height:18px; color:var(--ink-2); }
+.cleanup-status.ok { color:#1a6b4f; }
+.cleanup-status.warn { color:#8c5b0e; }
+.cleanup-status.err { color:#b91c1c; }
+
 /* --- floating assistant chat --- */
 .assistant-fab {
   position:fixed; right:24px; bottom:24px; z-index:9998;

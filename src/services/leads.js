@@ -2,6 +2,31 @@ import db from '../db/index.js';
 import { verifyLead } from './lead-verification.js';
 
 /**
+ * Canonical "unenriched" predicate. A lead has NO REACHABLE CONTACT when
+ * all three of email / phone / linkedin profile are missing or known-fake.
+ * Reused by:
+ *   - listLeads() default search guard (drops them from results)
+ *   - settings.js DB-cleanup preview + delete endpoints
+ *
+ * Pseudo-email hosts (@noemail.leads.local, @example.*) are treated as empty
+ * because they came from the legacy AI Web Search path before strict mode and
+ * are unreachable. Same for the literal string 'unknown'.
+ */
+export const UNENRICHED_WHERE_FRAGMENT = `
+  (email IS NULL OR email = '' OR email LIKE '%@noemail.%' OR email LIKE '%@example.%' OR lower(email) = 'unknown')
+  AND (phone IS NULL OR phone = '')
+  AND (linkedin_url IS NULL OR linkedin_url = '' OR linkedin_url NOT LIKE '%linkedin.com/in/%')
+`;
+
+const ENRICHED_WHERE_FRAGMENT = `
+  (
+    (l.email IS NOT NULL AND l.email != '' AND l.email NOT LIKE '%@noemail.%' AND l.email NOT LIKE '%@example.%' AND lower(l.email) != 'unknown')
+    OR (l.phone IS NOT NULL AND l.phone != '')
+    OR (l.linkedin_url IS NOT NULL AND l.linkedin_url LIKE '%linkedin.com/in/%')
+  )
+`;
+
+/**
  * Extract the canonical LinkedIn handle from a profile URL for dedup.
  * linkedin.com/in/FirdausH/  →  firdaush
  * www.linkedin.com/in/foo-bar?ref=x  →  foo-bar
@@ -204,12 +229,17 @@ export function getLead(id, userId) {
   return lead;
 }
 
-export function listLeads(userId, { status, persona, lead_type, search, limit = 100, offset = 0 } = {}) {
+export function listLeads(userId, { status, persona, lead_type, search, limit = 100, offset = 0, require_contact } = {}) {
   const where = ['l.user_id = ?'];
   const params = [userId];
   if (status) { where.push('l.status = ?'); params.push(status); }
   if (persona) { where.push('l.persona = ?'); params.push(persona); }
   if (lead_type) { where.push('l.lead_type = ?'); params.push(lead_type); }
+  // Default ON: drop leads with no reachable contact (no real email,
+  // no phone, no linkedin /in/ profile). Pass require_contact=0 to opt out
+  // when debugging the rejected pipeline.
+  const requireContact = require_contact === undefined || require_contact === '1' || require_contact === 1 || require_contact === true;
+  if (requireContact) where.push(ENRICHED_WHERE_FRAGMENT);
   if (search) {
     where.push('(l.name LIKE ? OR l.email LIKE ? OR a.name LIKE ?)');
     const s = `%${search}%`;

@@ -1537,7 +1537,51 @@ function SettingsView() {
     } catch (e) { /* ignore */ }
   }
   load();
+
+  wrap.append(CleanupCard());
   return wrap;
+}
+
+function CleanupCard() {
+  const card = el('div', { class: 'card cleanup-card' });
+  card.append(el('h3', {}, 'DATABASE CLEANUP'));
+  card.append(el('p', { class: 'cleanup-desc' },
+    'Remove unenriched leads — rows with no reachable contact (no real email, no phone, no LinkedIn /in/ profile). Targets legacy pseudo-email leads (@noemail.leads.local) from the old AI Web Search path and any AI-generated rows that slipped past the verification gate. Cascades through campaign_leads, sequence_enrollments, messages, activities, pipeline, appointments.'
+  ));
+  const status = el('div', { class: 'cleanup-status' });
+  const previewBtn = el('button', { class: 'btn', onclick: async () => {
+    status.textContent = 'Counting…';
+    status.className = 'cleanup-status';
+    try {
+      const r = await api('/settings/cleanup/unenriched-preview');
+      if (r.count === 0) {
+        status.textContent = 'Database is clean — 0 unenriched leads.';
+        status.className = 'cleanup-status ok';
+      } else {
+        const sampleNames = (r.sample || []).slice(0, 5).map(s => s.name || `#${s.id}`).join(', ');
+        status.textContent = `${r.count} unenriched lead(s) would be deleted. Sample: ${sampleNames}${r.sample.length < r.count ? '…' : ''}`;
+        status.className = 'cleanup-status warn';
+      }
+    } catch (e) { status.textContent = 'Preview failed: ' + e.message; status.className = 'cleanup-status err'; }
+  } }, 'Preview (dry-run)');
+  const deleteBtn = el('button', { class: 'btn danger primary', onclick: async () => {
+    let preview;
+    try { preview = await api('/settings/cleanup/unenriched-preview'); }
+    catch (e) { return alert('Preview failed: ' + e.message); }
+    if (preview.count === 0) return alert('Nothing to delete — database is already clean.');
+    if (!confirm(`Permanently delete ${preview.count} unenriched lead(s) and cascade through campaign_leads, sequence_enrollments, messages, activities, pipeline, appointments?\n\nThis cannot be undone.`)) return;
+    status.textContent = 'Deleting…';
+    status.className = 'cleanup-status';
+    try {
+      const r = await api('/settings/cleanup/unenriched', { method: 'POST' });
+      const tail = Object.entries(r.cascaded || {}).filter(([, n]) => n > 0).map(([t, n]) => `${t}: ${n}`).join(', ');
+      status.textContent = `Deleted ${r.deleted} lead(s).${tail ? ' Cascaded — ' + tail + '.' : ''}`;
+      status.className = 'cleanup-status ok';
+    } catch (e) { status.textContent = 'Delete failed: ' + e.message; status.className = 'cleanup-status err'; }
+  } }, 'Delete Unenriched Leads');
+  card.append(el('div', { class: 'cleanup-actions' }, previewBtn, deleteBtn));
+  card.append(status);
+  return card;
 }
 
 async function bootstrap() {
