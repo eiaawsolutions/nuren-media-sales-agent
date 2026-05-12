@@ -603,9 +603,11 @@ function LeadDetailView(leadId) {
 
   async function loadThread() {
     const thread = document.getElementById('thread');
+    if (!thread) return; // view was unmounted (user navigated away)
     thread.innerHTML = 'Loading thread…';
     try {
       const rows = await api('/messages?lead_id=' + leadId);
+      if (!thread.isConnected) return;
       thread.innerHTML = '';
       if (!rows.length) return thread.append(el('p', { class: 'sub' }, 'No drafts or messages yet. Click "Draft Day 1 email".'));
       for (const m of rows) {
