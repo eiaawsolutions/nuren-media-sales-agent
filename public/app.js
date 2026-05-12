@@ -124,10 +124,13 @@ function LoginView() {
     },
   }, 'Sign in');
   p.addEventListener('keydown', ev => { if (ev.key === 'Enter') btn.click(); });
+  const home = el('p', { style: 'margin:14px 0 0; text-align:center; font-size:13px' },
+    el('a', { href: '/', style: 'color:var(--ink-2); text-decoration:none' }, '← Return to home'),
+  );
   card.append(
     el('h1', {}, 'Nuren Sales Agent'),
     el('p', {}, 'Inside-sales workspace — media + community + KOL ecosystem.'),
-    u, p, err, btn,
+    u, p, err, btn, home,
   );
   wrap.append(card);
   return wrap;
